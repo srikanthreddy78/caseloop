@@ -333,7 +333,8 @@ async def _prefetch_orders(ctx: TurnContext) -> None:
         log.exception("order prefetch failed for case %s", ctx.case.id)
         return
     if result.orders or result.errors:
-        ctx.orders_found = result.summary()["found"]
+        summary = result.customer_summary(ctx.customer.email, ctx.customer.phone)
+        ctx.orders_found = summary["found"]
         await record_event(
             ctx.session,
             business_id=ctx.business.id,
@@ -343,7 +344,7 @@ async def _prefetch_orders(ctx: TurnContext) -> None:
             data={
                 "query": query.model_dump(exclude_none=True),
                 "found": len(result.orders),
-                "sources": result.summary()["sources_checked"],
+                "sources": summary["sources_checked"],
                 "errors": result.errors,
             },
         )

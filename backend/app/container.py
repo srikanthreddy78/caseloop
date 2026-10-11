@@ -125,7 +125,8 @@ def build_services(
         runner=runner,
         assessor=assessor,
         insights=insights or build_insights(settings),
-        orders=orders or OrderService(build_order_extractor(settings)),
+        orders=orders
+        or OrderService(build_order_extractor(settings), allow_localhost=settings.is_dev),
         scheduler=None,  # type: ignore[arg-type]
     )
     services.scheduler = Scheduler(session_factory, clock, services)

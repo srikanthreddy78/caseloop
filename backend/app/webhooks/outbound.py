@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -13,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.cases.service import enqueue_job
 from app.models import Business, JobKind
+from app.netguard import assert_public_url
 from app.webhooks.signatures import dial_signature
 
 log = logging.getLogger(__name__)
@@ -57,6 +59,7 @@ async def deliver_business_webhook(
         headers["X-Caseloop-Signature"] = (
             f"t={ts},v1={dial_signature(business.outbound_webhook_secret, ts, body)}"
         )
-    async with httpx.AsyncClient(timeout=15) as http:
+    await asyncio.to_thread(assert_public_url, business.outbound_webhook_url)
+    async with httpx.AsyncClient(timeout=15, follow_redirects=False) as http:
         resp = await http.post(business.outbound_webhook_url, content=body, headers=headers)
         resp.raise_for_status()

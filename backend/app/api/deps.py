@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import SESSION_COOKIE, business_for_api_key, hash_api_key, session_for_token
 from app.container import Services
-from app.models import Business, DashboardSession, TeamMember
+from app.models import Business, DashboardSession, MemberRole, TeamMember
 
 LAST_SEEN_REFRESH = timedelta(minutes=5)
 
@@ -99,6 +99,23 @@ async def require_member(
 
 BusinessDep = Annotated[Business, Depends(require_business)]
 MemberDep = Annotated[TeamMember, Depends(require_member)]
+
+
+async def require_owner(
+    request: Request, business: BusinessDep, session: SessionDep, services: ServicesDep
+) -> TeamMember:
+    """The signed-in owner of the business. Anything else that authenticates (an API key, a
+    non-owner member) is refused with 403; no credentials at all is still 401."""
+    dashboard_session = await resolve_dashboard_session(request, session, services)
+    member = dashboard_session.member if dashboard_session is not None else None
+    if member is None or member.business_id != business.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "only a signed-in owner can do this")
+    if member.role != MemberRole.OWNER:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "only owners can do this")
+    return member
+
+
+OwnerDep = Annotated[TeamMember, Depends(require_owner)]
 
 
 class RateLimiter:

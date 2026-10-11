@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
+from collections.abc import Mapping
 from typing import Any
 from urllib.parse import quote
 
 import httpx
 
 from app.channels.email import html_to_text
+from app.netguard import assert_public_url
 from app.orders.base import (
     OrderItem,
     OrderQuery,
@@ -65,8 +68,12 @@ def _dig(data: Any, path: str) -> Any:
     return cur
 
 
+OUR_STATUSES = frozenset(
+    {"placed", "processing", "shipped", "delivered", "cancelled", "refunded", "returned"}
+)
+
 STATUS_ALIASES = {
-    "fulfilled": "delivered",
+    "fulfilled": "shipped",
     "complete": "delivered",
     "completed": "delivered",
     "delivered": "delivered",
@@ -86,17 +93,28 @@ STATUS_ALIASES = {
 }
 
 
-def normalize_status(value: Any) -> str:
+def normalize_status(value: Any, overrides: Mapping[str, Any] | None = None) -> str:
+    """Map a source's status word onto ours. ``overrides`` (their value -> ours) win over the
+    built-in aliases; a mapped value that is not one of our statuses counts as unknown."""
     if value is None:
         return "unknown"
     key = str(value).strip().lower()
-    return STATUS_ALIASES.get(
-        key,
-        key
-        if key
-        in {"placed", "processing", "shipped", "delivered", "cancelled", "refunded", "returned"}
-        else "unknown",
-    )
+    if overrides:
+        for theirs, ours in overrides.items():
+            if str(theirs).strip().lower() == key:
+                ours = str(ours).strip().lower()
+                return ours if ours in OUR_STATUSES else "unknown"
+    mapped = STATUS_ALIASES.get(key, key)
+    return mapped if mapped in OUR_STATUSES else "unknown"
+
+
+def _source_id(config: dict[str, Any], default: str) -> str:
+    return str(config.get("id") or default)
+
+
+async def _assert_public(url: str, *, allow_localhost: bool) -> None:
+    """Resolve and vet the host off the event loop; raises UnsafeUrlError."""
+    await asyncio.to_thread(assert_public_url, url, allow_localhost=allow_localhost)
 
 
 class CustomApiProvider:
@@ -105,17 +123,25 @@ class CustomApiProvider:
      "list_path": "data" (optional, when the response wraps a list),
      "mapping": {"order_number": "id", "status": "state", "delivered_at": "delivered_on",
                  "tracking_number": "shipment.tracking", "tracking_url": "...", "total": "amount",
-                 "customer_email": "email", "items": "line_items", "item_name": "title", "item_qty": "qty"}}
+                 "customer_email": "email", "items": "line_items", "item_name": "title", "item_qty": "qty",
+                 "status_map": {"done": "delivered", "on_the_way": "shipped"}}}
+
+    ``status_map`` (their status -> ours) overrides the built-in aliases; "complete(d)" still
+    means delivered unless it says otherwise.
     """
 
     source = "custom_api"
 
-    def __init__(self, config: dict[str, Any]) -> None:
+    def __init__(self, config: dict[str, Any], *, allow_localhost: bool = False) -> None:
+        self.source_id = _source_id(config, self.source)
         self.url_template = str(config.get("url_template") or "")
         self.email_url_template = config.get("email_url_template")
         self.headers = dict(config.get("headers") or {})
         self.list_path = config.get("list_path")
         self.mapping = dict(config.get("mapping") or {})
+        status_map = self.mapping.pop("status_map", None)
+        self.status_map: dict[str, Any] = dict(status_map) if isinstance(status_map, dict) else {}
+        self.allow_localhost = allow_localhost
         if not self.url_template:
             raise ProviderNotConfigured("custom_api needs a url_template containing {order_number}")
 
@@ -129,7 +155,8 @@ class CustomApiProvider:
             url = str(self.email_url_template).replace("{email}", quote(query.email))
         if not url:
             return []
-        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, follow_redirects=True) as http:
+        await _assert_public(url, allow_localhost=self.allow_localhost)
+        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, follow_redirects=False) as http:
             resp = await http.get(url, headers=self.headers)
         if resp.status_code == 404:
             return []
@@ -140,7 +167,18 @@ class CustomApiProvider:
             rows = [rows]
         if not isinstance(rows, list):
             return []
-        return [r for r in (self._map(row) for row in rows) if r is not None]
+        out: list[OrderRecord] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                rec = self._map(row)
+            except (ValueError, TypeError) as exc:
+                log.warning("custom_api source %s: skipping a row: %s", self.source_id, exc)
+                continue
+            if rec is not None:
+                out.append(rec)
+        return out
 
     def _map(self, row: dict[str, Any]) -> OrderRecord | None:
         m = self.mapping
@@ -170,11 +208,12 @@ class CustomApiProvider:
             else None
         )
         total = get("total") or row.get("total")
+        order_number = normalize_order_number(str(number))
         return OrderRecord(
             source=self.source,
-            source_order_id=str(get("source_order_id") or row.get("id") or number),
-            order_number=normalize_order_number(str(number)),
-            status=normalize_status(get("status") or row.get("status")),
+            source_order_id=f"{self.source_id}:{order_number}",
+            order_number=order_number,
+            status=normalize_status(get("status") or row.get("status"), self.status_map),
             customer_email=get("customer_email") or row.get("email"),
             customer_name=get("customer_name"),
             items=items,
@@ -193,9 +232,13 @@ class TrackingPageProvider:
 
     source = "tracking_page"
 
-    def __init__(self, config: dict[str, Any], extractor: OrderExtractor) -> None:
+    def __init__(
+        self, config: dict[str, Any], extractor: OrderExtractor, *, allow_localhost: bool = False
+    ) -> None:
+        self.source_id = _source_id(config, self.source)
         self.url_template = str(config.get("url_template") or "")
         self.extractor = extractor
+        self.allow_localhost = allow_localhost
         if "{order_number}" not in self.url_template:
             raise ProviderNotConfigured(
                 "tracking_page needs a url_template containing {order_number}"
@@ -206,19 +249,22 @@ class TrackingPageProvider:
             return []
         number = normalize_order_number(query.order_number)
         url = self.url_template.replace("{order_number}", quote(number))
+        await _assert_public(url, allow_localhost=self.allow_localhost)
         async with httpx.AsyncClient(
-            timeout=HTTP_TIMEOUT, follow_redirects=True, headers={"User-Agent": "Caseloop/1.0"}
+            timeout=HTTP_TIMEOUT, follow_redirects=False, headers={"User-Agent": "Caseloop/1.0"}
         ) as http:
             resp = await http.get(url)
-        if resp.status_code >= 400:
+        if resp.status_code >= 300:
             return []
         text = (
             html_to_text(resp.text) if "html" in resp.headers.get("content-type", "") else resp.text
         )
         records = await self.extractor.extract(text, source=self.source, hint=number)
-        return [r for r in records if normalize_order_number(r.order_number) == number] or records[
-            :1
-        ]
+        matched = [r for r in records if normalize_order_number(r.order_number) == number]
+        out = matched or records[:1]
+        for r in out:
+            r.source_order_id = f"{self.source_id}:{normalize_order_number(r.order_number)}"
+        return out
 
 
 class ShopifyProvider:
@@ -244,12 +290,19 @@ class ShopifyProvider:
         else:
             return []
         url = f"https://{self.shop}/admin/api/{self.version}/orders.json"
-        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as http:
+        await _assert_public(url, allow_localhost=False)
+        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, follow_redirects=False) as http:
             resp = await http.get(
                 url, params=params, headers={"X-Shopify-Access-Token": self.token}
             )
         resp.raise_for_status()
-        return [self._map(o) for o in resp.json().get("orders", [])]
+        out: list[OrderRecord] = []
+        for o in resp.json().get("orders", []):
+            try:
+                out.append(self._map(o))
+            except (ValueError, TypeError) as exc:
+                log.warning("shopify %s: skipping an order: %s", self.shop, exc)
+        return out
 
     def _map(self, o: dict[str, Any]) -> OrderRecord:
         fulfillments = o.get("fulfillments") or []
@@ -267,15 +320,16 @@ class ShopifyProvider:
             shipped_at = f.get("created_at")
             if f.get("shipment_status") == "delivered":
                 delivered_at = f.get("updated_at")
-        status = (
-            "cancelled"
-            if o.get("cancelled_at")
-            else normalize_status(
-                "delivered"
-                if delivered_at
-                else (o.get("fulfillment_status") or o.get("financial_status"))
-            )
-        )
+        # Shopify's "fulfilled" only means the parcel left the warehouse; delivered comes from the
+        # fulfillment's shipment_status, never from fulfillment_status.
+        if o.get("cancelled_at"):
+            status = "cancelled"
+        elif delivered_at:
+            status = "delivered"
+        elif o.get("fulfillment_status") in ("fulfilled", "partial"):
+            status = "shipped"
+        else:
+            status = normalize_status(o.get("fulfillment_status") or o.get("financial_status"))
         if o.get("financial_status") == "refunded":
             status = "refunded"
         customer = o.get("customer") or {}

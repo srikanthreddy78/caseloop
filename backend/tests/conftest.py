@@ -65,6 +65,17 @@ async def clean_tables(engine: AsyncEngine) -> AsyncIterator[None]:
         await conn.execute(text(f"TRUNCATE {names} RESTART IDENTITY CASCADE"))
 
 
+PUBLIC_ADDRESS = "93.184.216.34"
+
+
+@pytest.fixture(autouse=True)
+def public_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests never touch DNS: every hostname resolves to one public address, so the outbound
+    URL guard passes for the example hosts respx answers for. Tests of the guard itself patch
+    ``app.netguard.resolve_host`` again."""
+    monkeypatch.setattr("app.netguard.resolve_host", lambda host: [PUBLIC_ADDRESS])
+
+
 @pytest.fixture
 def clock() -> FakeClock:
     return FakeClock()
