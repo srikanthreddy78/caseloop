@@ -14,9 +14,20 @@ from app.cases.service import (
     find_case_for_customer,
     get_or_create_customer,
     ingest_inbound,
+    open_case,
     record_event,
 )
-from app.models import Business, Case, Channel, Job, JobKind, JobStatus, Message, Sender
+from app.models import (
+    Business,
+    Case,
+    Channel,
+    Direction,
+    Job,
+    JobKind,
+    JobStatus,
+    Message,
+    Sender,
+)
 
 log = logging.getLogger(__name__)
 
@@ -229,6 +240,18 @@ class DialEventListener:
                 transcript = getattr(call, "transcript", None) or getattr(
                     call, "transcript_turns", None
                 )
+                terminal = (
+                    "completed",
+                    "ended",
+                    "failed",
+                    "canceled",
+                    "cancelled",
+                    "busy",
+                    "no-answer",
+                )
+                if call_id and status not in terminal:
+                    await self._open_live_call_case(session, call, call_id)
+                    continue
                 if not call_id or status not in ("completed", "ended") or not transcript:
                     continue
                 seen = await session.execute(
@@ -270,7 +293,66 @@ class DialEventListener:
             await session.commit()
         return queued
 
-    async def poll_calls_forever(self, interval: float = 60.0) -> None:
+    async def _open_live_call_case(self, session: AsyncSession, call: Any, call_id: str) -> None:
+        """A call is ringing or in progress: show it in the dashboard right away."""
+        marker = f"{call_id}:live"
+        seen = await session.execute(
+            select(Message.id).where(Message.provider_message_id == marker).limit(1)
+        )
+        if seen.first() is not None:
+            return
+        number_id = getattr(call, "phone_number_id", None)
+        business = (
+            (
+                await session.execute(select(Business).where(Business.dial_number_id == number_id))
+            ).scalar_one_or_none()
+            if number_id
+            else None
+        )
+        direction = getattr(call, "direction", "inbound")
+        customer_number = (
+            getattr(call, "to", None) if direction == "outbound" else getattr(call, "from_", None)
+        )
+        if business is None or not customer_number:
+            return
+        now = self.services.clock.now()
+        customer = await get_or_create_customer(session, business, phone=customer_number)
+        case, _ = await find_case_for_customer(
+            session,
+            business,
+            customer,
+            now=now,
+            reopen_window_days=self.services.settings.reopen_window_days,
+        )
+        if case is None:
+            case = await open_case(
+                session, business, customer, channel=Channel.VOICE, now=now, subject="Phone call"
+            )
+        session.add(
+            Message(
+                case_id=case.id,
+                direction=Direction.INTERNAL,
+                channel=Channel.VOICE,
+                sender=Sender.SYSTEM,
+                body_text=(
+                    f"Phone call in progress with {customer_number}. "
+                    "The transcript will appear here when the call ends."
+                ),
+                provider_message_id=marker,
+                meta={"call_id": call_id, "live": True},
+            )
+        )
+        await record_event(
+            session,
+            business_id=business.id,
+            case_id=case.id,
+            type="call_started",
+            actor=Sender.SYSTEM,
+            data={"call_id": call_id, "from": customer_number},
+        )
+        await session.commit()
+
+    async def poll_calls_forever(self, interval: float = 5.0) -> None:
         while not self._stop.is_set():
             try:
                 queued = await self.sync_recent_calls()

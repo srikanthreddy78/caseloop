@@ -116,3 +116,44 @@ async def test_finished_calls_are_queued_once(services: Services, business: dict
         assert await listener.sync_recent_calls() == 0  # already queued
     finally:
         services.channels.dial = None
+
+
+async def test_live_call_shows_up_before_it_ends(
+    auth_client: AsyncClient, services: Services, business: dict[str, Any]
+) -> None:
+    class Call:
+        def __init__(self, cid: str, status: Any, transcript: str | None, from_: str) -> None:
+            self.id, self.status, self.transcript, self.from_ = cid, status, transcript, from_
+            self.direction = "inbound"
+            self.phone_number_id = BUSINESS_PAYLOAD["dial_number_id"]
+
+    class FakeDial:
+        def __init__(self) -> None:
+            self.calls = [
+                Call(
+                    "call_live",
+                    {"state": "InProgress", "label": "In progress"},
+                    None,
+                    "+15550009090",
+                )
+            ]
+
+        async def list_calls(self) -> list[Call]:
+            return self.calls
+
+    dial = FakeDial()
+    services.channels.dial = dial
+    try:
+        listener = DialEventListener(services)
+        await listener.sync_recent_calls()
+        cases = (await auth_client.get("/v1/cases")).json()["data"]
+        live = [c for c in cases if c["customer"]["phone"] == "+15550009090"]
+        assert len(live) == 1 and live[0]["channel"] == "voice"
+        await listener.sync_recent_calls()  # no duplicate marker
+        detail = (await auth_client.get(f"/v1/cases/{live[0]['id']}")).json()["data"]
+        assert sum(1 for m in detail["messages"] if "in progress" in m["body_text"]) == 1
+        dial.calls[0].status = {"state": "Terminated", "terminationType": "completed"}
+        dial.calls[0].transcript = "agent: hi\nuser: lamp cracked, order 5"
+        assert await listener.sync_recent_calls() == 1
+    finally:
+        services.channels.dial = None

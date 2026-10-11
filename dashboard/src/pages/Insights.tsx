@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { ApiError, api, fmtTime } from "../api";
 import type { Case, Snapshot } from "../types";
@@ -6,12 +6,49 @@ import type { Case, Snapshot } from "../types";
 export function Insights() {
   const [snap, setSnap] = useState<Snapshot | null | undefined>(undefined);
   const [busy, setBusy] = useState(false);
-  const [cases, setCases] = useState<Case[]>([]);
+  const [cases, setCases] = useState<Case[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [statsError, setStatsError] = useState<string | null>(null);
+  const requestId = useRef(0);
+  const statsRequestId = useRef(0);
+  const generating = useRef(false);
 
-  const load = () => api<{ data: Snapshot }>("/v1/insights/latest").then((r) => setSnap(r.data)).catch((e) => { if (e instanceof ApiError && e.status === 404) setSnap(null); else throw e; });
-  useEffect(() => { load(); api<{ data: Case[] }>("/v1/cases?limit=200").then((r) => setCases(r.data)).catch(() => undefined); }, []);
-  const byChannel = (keys: string[]) => cases.filter((c) => keys.includes(c.channel)).length;
-  const byState = (keys: string[]) => cases.filter((c) => keys.includes(c.state)).length;
+  const load = useCallback(async () => {
+    const request = ++requestId.current;
+    setError(null);
+    try {
+      const r = await api<{ data: Snapshot }>("/v1/insights/latest");
+      if (request === requestId.current) setSnap(r.data);
+    } catch (ex) {
+      if (request !== requestId.current) return;
+      if (ex instanceof ApiError && ex.status === 404) setSnap(null);
+      else setError((ex as Error).message);
+    }
+  }, []);
+  useEffect(() => { void load(); return () => { requestId.current++; }; }, [load]);
+
+  const loadStats = useCallback(async () => {
+    const request = ++statsRequestId.current;
+    setCases(null); setStatsError(null);
+    try {
+      const collected: Case[] = [];
+      let total = 0;
+      do {
+        const r = await api<{ data: Case[]; meta: { total: number } }>(`/v1/cases?limit=200&offset=${collected.length}`);
+        if (request !== statsRequestId.current) return;
+        collected.push(...r.data);
+        total = r.meta.total;
+        if (r.data.length === 0) break;
+      } while (collected.length < total);
+      setCases(collected);
+    } catch (ex) {
+      if (request === statsRequestId.current) setStatsError((ex as Error).message);
+    }
+  }, []);
+  useEffect(() => { void loadStats(); return () => { statsRequestId.current++; }; }, [loadStats]);
+
+  const byChannel = (keys: string[]) => cases?.filter((c) => keys.includes(c.channel)).length;
+  const byState = (keys: string[]) => cases?.filter((c) => keys.includes(c.state)).length;
   const stats = [
     { label: "Email", value: byChannel(["email"]) },
     { label: "Website chat", value: byChannel(["webchat"]) },
@@ -22,12 +59,27 @@ export function Insights() {
   ];
 
   const generate = async () => {
-    setBusy(true);
-    try { const r = await api<{ data: Snapshot }>("/v1/insights/generate", { method: "POST" }); setSnap(r.data); }
-    finally { setBusy(false); }
+    if (generating.current) return;
+    generating.current = true;
+    const request = ++requestId.current;
+    setBusy(true); setError(null);
+    try {
+      const r = await api<{ data: Snapshot }>("/v1/insights/generate", { method: "POST" });
+      if (request === requestId.current) { setSnap(r.data); await loadStats(); }
+    } catch (ex) {
+      if (request === requestId.current) setError((ex as Error).message);
+    } finally {
+      generating.current = false;
+      if (request === requestId.current) setBusy(false);
+    }
   };
 
-  if (snap === undefined) return <p className="text-ink-soft">Loading…</p>;
+  if (snap === undefined) return error ? (
+    <div>
+      <p className="text-sm text-clay" role="alert">{error}</p>
+      <button className="btn mt-2" type="button" onClick={() => void load()}>Retry</button>
+    </div>
+  ) : <p className="text-ink-soft">Loading…</p>;
 
   return (
     <div>
@@ -39,14 +91,23 @@ export function Insights() {
         <button className="btn btn-primary" onClick={generate} disabled={busy}>{busy ? "Reading cases…" : "Refresh now"}</button>
       </header>
 
+      {error && <p className="text-sm text-clay mb-4" role="alert">{error}</p>}
+
       <section className="grid grid-cols-6 gap-3 mb-10">
         {stats.map((s) => (
           <div key={s.label} className="rounded-lg border border-line bg-panel px-4 py-3">
-            <div className="text-2xl font-semibold leading-none">{s.value}</div>
+            <div className="text-2xl font-semibold leading-none">{s.value ?? (statsError ? "—" : "…")}</div>
             <div className="text-xs text-ink-soft mt-1.5">{s.label}</div>
           </div>
         ))}
       </section>
+
+      {statsError && (
+        <div className="mb-4">
+          <p className="text-sm text-clay" role="alert">Could not load case counts: {statsError}</p>
+          <button className="btn mt-2" type="button" onClick={() => void loadStats()}>Retry counts</button>
+        </div>
+      )}
 
       {!snap ? (
         <div className="border border-dashed border-line rounded-lg p-10 text-center">

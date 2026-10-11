@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import type { SourceConfig, SourcesInfo } from "../types";
 
@@ -20,7 +20,17 @@ function fromForm(f: Record<string, string>): SourceConfig {
   const out: SourceConfig = { type: f.type };
   for (const [k, v] of Object.entries(f)) {
     if (k === "type" || k === "label" || v === "") continue;
-    if ((k === "headers" || k === "mapping") && v !== "••••") { try { out[k] = JSON.parse(v); } catch { throw new Error(`${k} must be valid JSON`); } }
+    if ((k === "headers" || k === "mapping") && v !== "••••") {
+      let parsed: unknown;
+      try { parsed = JSON.parse(v); } catch { throw new Error(`${k} must be valid JSON`); }
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error(`${k} must be a JSON object`);
+      for (const [key, value] of Object.entries(parsed)) {
+        if (k === "mapping" && key === "status_map") {
+          if (!value || typeof value !== "object" || Array.isArray(value) || Object.values(value).some((status) => typeof status !== "string")) throw new Error("status_map must map status names to strings");
+        } else if (typeof value !== "string") throw new Error(`${k} values must be strings`);
+      }
+      out[k] = parsed;
+    }
     else out[k] = v;
   }
   return out;
@@ -29,21 +39,32 @@ function fromForm(f: Record<string, string>): SourceConfig {
 export function OrderSources() {
   const [rows, setRows] = useState<Record<string, string>[] | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const latestLoad = useRef(0);
 
-  useEffect(() => { api<{ data: SourcesInfo }>("/v1/orders/sources").then((r) => setRows(r.data.configured.map(toForm))); }, []);
-  if (!rows) return null;
+  const load = () => {
+    const request = ++latestLoad.current;
+    return api<{ data: SourcesInfo }>("/v1/orders/sources").then((r) => {
+      if (request !== latestLoad.current) return;
+      setRows(r.data.configured.map(toForm)); setMsg(null);
+    }).catch((e) => { if (request === latestLoad.current) setMsg((e as Error).message); });
+  };
+  useEffect(() => { load(); return () => { latestLoad.current += 1; }; }, []);
+  if (!rows) return msg ? <div><p className="text-sm text-clay">{msg}</p><button type="button" className="btn mt-3" onClick={load}>Retry order sources</button></div> : null;
 
   const save = async () => {
-    setMsg(null);
+    if (busy) return;
+    setBusy(true); setMsg(null);
     try {
       const r = await api<{ data: SourceConfig[] }>("/v1/orders/sources", { method: "PUT", body: JSON.stringify({ order_sources: rows.map(fromForm) }) });
       setRows(r.data.map(toForm)); setMsg("Saved");
       setTimeout(() => setMsg(null), 2000);
     } catch (e) { setMsg((e as Error).message); }
+    finally { setBusy(false); }
   };
 
   return (
-    <div className="flex flex-col gap-4">
+    <form className="flex flex-col gap-4" onSubmit={(e) => { e.preventDefault(); save(); }}>
       <div>
         <h2 className="text-sm font-medium">Order sources</h2>
         <p className="text-sm text-ink-soft">Where the agent looks orders up. Every result is labeled with its source. Files and forwarded emails are added on the Orders page.</p>
@@ -53,19 +74,19 @@ export function OrderSources() {
         return (
           <div key={i} className="rounded-lg border border-line bg-panel p-4 flex flex-col gap-3">
             <div className="flex items-center justify-between">
-              <select className="field max-w-xs" value={row.type} onChange={(e) => setRows(rows.map((r, j) => (j === i ? { type: e.target.value } : r)))}>
+              <select className="field max-w-xs" value={row.type} disabled={busy} onChange={(e) => setRows(rows.map((r, j) => (j === i ? { type: e.target.value } : r)))}>
                 {KINDS.map((k) => <option key={k.type} value={k.type}>{k.label}</option>)}
               </select>
-              <button type="button" className="text-sm text-ink-soft hover:text-clay" onClick={() => setRows(rows.filter((_, j) => j !== i))}>Remove</button>
+              <button type="button" className="text-sm text-ink-soft hover:text-clay" disabled={busy} onClick={() => setRows(rows.filter((_, j) => j !== i))}>Remove</button>
             </div>
             <p className="text-xs text-ink-soft">{kind.help}</p>
             {kind.fields.map((f) => (
               <div key={f.key}>
                 <label className="block text-xs text-ink-soft mb-1">{f.label}</label>
                 {f.textarea ? (
-                  <textarea className="field font-mono text-xs min-h-20" placeholder={f.placeholder} value={row[f.key] || ""} onChange={(e) => setRows(rows.map((r, j) => (j === i ? { ...r, [f.key]: e.target.value } : r)))} />
+                  <textarea className="field font-mono text-xs min-h-20" placeholder={f.placeholder} value={row[f.key] || ""} disabled={busy} onChange={(e) => setRows(rows.map((r, j) => (j === i ? { ...r, [f.key]: e.target.value } : r)))} />
                 ) : (
-                  <input className="field" type={f.secret && row[f.key] !== "••••" ? "password" : "text"} placeholder={f.placeholder} value={row[f.key] || ""} onChange={(e) => setRows(rows.map((r, j) => (j === i ? { ...r, [f.key]: e.target.value } : r)))} />
+                  <input className="field" type={f.secret && row[f.key] !== "••••" ? "password" : "text"} placeholder={f.placeholder} value={row[f.key] || ""} disabled={busy} onChange={(e) => setRows(rows.map((r, j) => (j === i ? { ...r, [f.key]: e.target.value } : r)))} />
                 )}
               </div>
             ))}
@@ -73,10 +94,10 @@ export function OrderSources() {
         );
       })}
       <div className="flex items-center gap-2">
-        <button type="button" className="btn" onClick={() => setRows([...rows, { type: "shopify" }])}>Add a source</button>
-        <button type="button" className="btn btn-primary" onClick={save}>Save sources</button>
+        <button type="button" className="btn" disabled={busy} onClick={() => setRows([...rows, { type: "shopify" }])}>Add a source</button>
+        <button type="submit" className="btn btn-primary" disabled={busy}>Save sources</button>
         {msg && <span className="text-sm text-ink-soft">{msg}</span>}
       </div>
-    </div>
+    </form>
   );
 }

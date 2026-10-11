@@ -7,16 +7,21 @@ export function Login() {
   const [params] = useSearchParams();
   const navigate = useNavigate();
   const [error, setError] = useState<string | null>(null);
-  const started = useRef(false);
+  const exchange = useRef<{ token: string; request: Promise<unknown> } | null>(null);
   const token = params.get("token");
 
   useEffect(() => {
-    if (started.current) return; // the token is single-use; never exchange it twice (StrictMode)
-    started.current = true;
+    let cancelled = false;
+    setError(null);
     if (!token) { setError("This link is missing its token."); return; }
-    api("/v1/auth/magic-link/exchange", { method: "POST", body: JSON.stringify({ token }) })
-      .then(() => { setApiKey(null); navigate("/cases", { replace: true }); })
-      .catch((e) => setError((e as Error).message));
+    // Reuse the request during StrictMode's effect replay; a new link needs its own exchange.
+    if (exchange.current?.token !== token) {
+      exchange.current = { token, request: api("/v1/auth/magic-link/exchange", { method: "POST", body: JSON.stringify({ token }) }) };
+    }
+    exchange.current.request
+      .then(() => { if (!cancelled) { setApiKey(null); navigate("/cases", { replace: true }); } })
+      .catch((e) => { if (!cancelled) setError((e as Error).message); });
+    return () => { cancelled = true; };
   }, [token, navigate]);
 
   return (

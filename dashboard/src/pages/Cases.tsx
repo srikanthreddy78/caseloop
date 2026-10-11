@@ -10,6 +10,7 @@ const FILTERS: { label: string; states: CaseState[] | null }[] = [
   { label: "Resolved", states: ["resolved"] },
   { label: "All", states: null },
 ];
+const PAGE_SIZE = 100;
 
 const CHANNEL_LABEL: Record<string, string> = { email: "email", webchat: "website chat", sms: "text", voice: "phone call", api: "api" };
 
@@ -27,13 +28,34 @@ function waitingFor(c: Case): string {
 export function Cases() {
   const [params, setParams] = useSearchParams();
   const filter = FILTERS.find((f) => f.label === params.get("f")) || FILTERS[0];
+  const requestedOffset = Number(params.get("offset") || 0);
+  const offset = Number.isSafeInteger(requestedOffset) && requestedOffset >= 0 ? requestedOffset : 0;
   const [cases, setCases] = useState<Case[] | null>(null);
   const [total, setTotal] = useState(0);
+  const [error, setError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
-    const q = filter.states ? `?state=${filter.states.join(",")}&limit=100` : "?limit=100";
-    api<{ data: Case[]; meta: { total: number } }>(`/v1/cases${q}`).then((r) => { setCases(r.data); setTotal(r.meta.total); });
-  }, [filter]);
+    const t = setInterval(() => setAttempt((a) => a + 1), 5000);
+    return () => clearInterval(t);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    setError(null);
+    const q = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset) });
+    if (filter.states) q.set("state", filter.states.join(","));
+    api<{ data: Case[]; meta: { total: number } }>(`/v1/cases?${q}`).then((r) => {
+      if (!cancelled) { setCases(r.data); setTotal(r.meta.total); }
+    }).catch((ex) => { if (!cancelled) setError((ex as Error).message); });
+    return () => { cancelled = true; };
+  }, [filter, offset, attempt]);
+
+  const goToOffset = (nextOffset: number) => setParams((current) => {
+    const next = new URLSearchParams(current);
+    if (nextOffset) next.set("offset", String(nextOffset)); else next.delete("offset");
+    return next;
+  });
 
   return (
     <div>
@@ -49,7 +71,12 @@ export function Cases() {
         </div>
       </header>
 
-      {cases === null ? (
+      {error ? (
+        <div>
+          <p className="text-sm text-clay" role="alert">{error}</p>
+          <button className="btn mt-2" type="button" onClick={() => setAttempt((n) => n + 1)}>Retry</button>
+        </div>
+      ) : cases === null ? (
         <p className="text-ink-soft">Loading…</p>
       ) : cases.length === 0 ? (
         <div className="border border-dashed border-line rounded-lg p-10 text-center">
@@ -72,6 +99,13 @@ export function Cases() {
             </li>
           ))}
         </ul>
+      )}
+      {(total > PAGE_SIZE || offset > 0) && (
+        <div className="flex items-center justify-between mt-4 text-sm">
+          <button className="btn" type="button" disabled={offset === 0 || (cases === null && !error)} onClick={() => goToOffset(Math.max(0, offset - PAGE_SIZE))}>Previous</button>
+          {cases && <span className="text-ink-soft">{cases.length ? `${offset + 1}–${offset + cases.length}` : "0"} of {total}</span>}
+          <button className="btn" type="button" disabled={cases === null || offset + PAGE_SIZE >= total} onClick={() => goToOffset(offset + PAGE_SIZE)}>Next</button>
+        </div>
       )}
     </div>
   );

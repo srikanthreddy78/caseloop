@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useOutletContext } from "react-router-dom";
 import { api } from "../api";
 import { OrderCard, SourceBadge } from "../components/OrderCard";
@@ -15,15 +15,26 @@ export function Orders() {
   const [testNumber, setTestNumber] = useState("");
   const [importMsg, setImportMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [testError, setTestError] = useState<string | null>(null);
+  const latestLoad = useRef(0);
+  const activeQuery = useRef("");
 
-  const load = async (query = "") => {
-    const [s, o] = await Promise.all([
-      api<{ data: SourcesInfo }>("/v1/orders/sources"),
-      api<{ data: OrderOut[] }>(`/v1/orders${query ? `?q=${encodeURIComponent(query)}` : ""}`),
-    ]);
-    setInfo(s.data); setOrders(o.data);
+  const load = async (query = activeQuery.current) => {
+    const request = ++latestLoad.current;
+    activeQuery.current = query;
+    try {
+      const [s, o] = await Promise.all([
+        api<{ data: SourcesInfo }>("/v1/orders/sources"),
+        api<{ data: OrderOut[] }>(`/v1/orders${query ? `?q=${encodeURIComponent(query)}` : ""}`),
+      ]);
+      if (request !== latestLoad.current) return;
+      setError(null); setInfo(s.data); setOrders(o.data);
+    } catch (e) {
+      if (request === latestLoad.current) setError((e as Error).message);
+    }
   };
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); return () => { latestLoad.current += 1; }; }, []);
 
   const importFile = async (file: File) => {
     setBusy(true); setImportMsg(null);
@@ -47,13 +58,14 @@ export function Orders() {
   };
 
   const runTest = async () => {
-    if (!testNumber.trim()) return;
-    setBusy(true);
-    try { const r = await api<{ data: LookupSummary }>("/v1/orders/sources/test", { method: "POST", body: JSON.stringify({ order_number: testNumber }) }); setTest(r.data); await load(q); }
+    if (busy || !testNumber.trim()) return;
+    setBusy(true); setTest(null); setTestError(null);
+    try { const r = await api<{ data: LookupSummary }>("/v1/orders/sources/test", { method: "POST", body: JSON.stringify({ order_number: testNumber }) }); setTest(r.data); await load(); }
+    catch (e) { setTestError((e as Error).message); }
     finally { setBusy(false); }
   };
 
-  if (!info) return <p className="text-ink-soft">Loading…</p>;
+  if (!info) return <div><p className="text-ink-soft">{error || "Loading…"}</p>{error && <button className="btn mt-3" onClick={() => load()}>Retry</button>}</div>;
   const stored = Object.entries(info.stored_counts);
 
   return (
@@ -69,6 +81,7 @@ export function Orders() {
             <input className="field" placeholder="Search by order number, email, or phone" value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") load(q); }} />
             <button className="btn" onClick={() => load(q)}>Search</button>
           </div>
+          {error && <p className="text-sm text-clay mb-4">{error}</p>}
           {orders.length === 0 ? (
             <div className="border border-dashed border-line rounded-lg p-8 text-center">
               <p className="font-medium">No orders stored yet.</p>
@@ -91,9 +104,10 @@ export function Orders() {
             <h2 className="font-semibold mb-1">Try a lookup</h2>
             <p className="text-sm text-ink-soft mb-3">Exactly what the agent gets when it checks an order, with the source named.</p>
             <div className="flex gap-2 mb-4">
-              <input className="field max-w-xs" placeholder="Order number" value={testNumber} onChange={(e) => setTestNumber(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") runTest(); }} />
+              <input className="field max-w-xs" placeholder="Order number" value={testNumber} disabled={busy} onChange={(e) => setTestNumber(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") runTest(); }} />
               <button className="btn btn-primary" onClick={runTest} disabled={busy}>Look up</button>
             </div>
+            {testError && <p className="text-sm text-clay">{testError}</p>}
             {test && (
               <div className="flex flex-col gap-2">
                 {test.no_order_system_connected && <p className="text-sm text-amber">No order source is connected yet, so nothing was checked.</p>}

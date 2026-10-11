@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ago, api } from "../api";
 import type { Job } from "../types";
 
@@ -12,11 +12,18 @@ export function Queue() {
   const [jobs, setJobs] = useState<Job[] | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
+  const latestLoad = useRef(0);
 
-  const load = () => api<{ data: Job[] }>("/v1/jobs?status=failed&limit=50").then((r) => setJobs(r.data)).catch((e) => setMsg((e as Error).message));
-  useEffect(() => { load(); }, []);
+  const load = () => {
+    const request = ++latestLoad.current;
+    return api<{ data: Job[] }>("/v1/jobs?status=failed&limit=50").then((r) => {
+      if (request === latestLoad.current) setJobs(r.data);
+    }).catch((e) => { if (request === latestLoad.current) setMsg((e as Error).message); });
+  };
+  useEffect(() => { load(); return () => { latestLoad.current += 1; }; }, []);
 
   const retry = async (id: string) => {
+    if (busy) return;
     setBusy(id); setMsg(null);
     try { await api(`/v1/jobs/${id}/retry`, { method: "POST" }); await load(); }
     catch (e) { setMsg((e as Error).message); }
@@ -42,7 +49,7 @@ export function Queue() {
                 <div className="text-xs text-ink-soft">{j.attempts} attempts · {ago(j.updated_at)}</div>
               </div>
               <code className="text-xs text-clay break-all leading-relaxed" title={j.last_error || undefined}>{trim(j.last_error) || "no error recorded"}</code>
-              <button type="button" className="btn h-8" disabled={busy === j.id} onClick={() => retry(j.id)}>{busy === j.id ? "Retrying…" : "Retry"}</button>
+              <button type="button" className="btn h-8" disabled={busy !== null} onClick={() => retry(j.id)}>{busy === j.id ? "Retrying…" : "Retry"}</button>
             </li>
           ))}
         </ul>

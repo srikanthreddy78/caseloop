@@ -10,6 +10,7 @@ export default defineConfig({
     proxy: {
       "/v1": "http://localhost:8000",
       "/dev": "http://localhost:8000",
+      "/widget.js": "http://localhost:8000",
     },
   },
 });

@@ -6,6 +6,8 @@ import { OrderSources } from "../components/OrderSources";
 import { Queue } from "../components/Queue";
 import { Team } from "../components/Team";
 
+const escapeAttribute = (value: string) => value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
 export function Settings() {
   const { business, setBusiness, member } = useOutletContext<ShellContext>();
   const [form, setForm] = useState({
@@ -20,7 +22,7 @@ export function Settings() {
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const origin = window.location.origin;
-  const snippet = `<script src="${origin}/widget.js" data-key="${business.widget_public_key}" data-name="${business.name}"></script>`;
+  const snippet = `<script src="${origin}/widget.js" data-key="${escapeAttribute(business.widget_public_key)}" data-name="${escapeAttribute(business.name)}"></script>`;
 
   const save = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -38,6 +40,7 @@ export function Settings() {
 
   return (
     <div className="grid grid-cols-[1fr_340px] gap-12">
+      <div className="flex flex-col gap-6">
       <form onSubmit={save} className="flex flex-col gap-6">
         <header>
           <h1 className="text-2xl font-semibold">Setup</h1>
@@ -81,9 +84,10 @@ export function Settings() {
         </div>
         {error && <p className="text-clay text-sm">{error}</p>}
         <div><button className="btn btn-primary" type="submit">{saved ? "Saved" : "Save changes"}</button></div>
+      </form>
         <div className="border-t border-line pt-6"><OrderSources /></div>
         <div className="border-t border-line pt-6"><Queue /></div>
-      </form>
+      </div>
       <div className="border-t border-line pt-6"><Team member={member} /></div>
 
       <aside className="flex flex-col gap-6 text-sm">

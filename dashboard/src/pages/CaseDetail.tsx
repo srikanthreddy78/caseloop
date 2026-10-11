@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api, fmtTime } from "../api";
 import { StatePill } from "../components/StatePill";
@@ -25,28 +25,83 @@ export function CaseDetail() {
   const [timeline, setTimeline] = useState<TimelineItem[]>([]);
   const [reply, setReply] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [showTools, setShowTools] = useState(false);
   const [orders, setOrders] = useState<LookupSummary | null>(null);
+  const [ordersError, setOrdersError] = useState<string | null>(null);
+  const requestId = useRef(0);
+  const caseVersion = useRef(0);
+  const acting = useRef(false);
 
   const load = useCallback(async () => {
-    const [a, b] = await Promise.all([
-      api<{ data: CaseDetailT }>(`/v1/cases/${id}`),
-      api<{ data: TimelineItem[] }>(`/v1/cases/${id}/timeline`),
+    const request = ++requestId.current;
+    await Promise.all([
+      (async () => {
+        try {
+          const [a, b] = await Promise.all([
+            api<{ data: CaseDetailT }>(`/v1/cases/${id}`),
+            api<{ data: TimelineItem[] }>(`/v1/cases/${id}/timeline`),
+          ]);
+          if (request === requestId.current) {
+            setCase(a.data); setTimeline(b.data); setLoadError(null);
+          }
+        } catch (ex) {
+          if (request === requestId.current) setLoadError((ex as Error).message);
+        }
+      })(),
+      api<{ data: LookupSummary }>(`/v1/cases/${id}/orders`).then((r) => {
+        if (request === requestId.current) { setOrders(r.data); setOrdersError(null); }
+      }).catch((ex) => {
+        if (request === requestId.current) setOrdersError((ex as Error).message);
+      }),
     ]);
-    setCase(a.data); setTimeline(b.data);
-    api<{ data: LookupSummary }>(`/v1/cases/${id}/orders`).then((r) => setOrders(r.data)).catch(() => setOrders(null));
   }, [id]);
 
-  useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, [load]);
+  useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    setCase(null); setTimeline([]); setReply(""); setError(null); setLoadError(null);
+    setOrders(null); setOrdersError(null); setShowTools(false); setBusy(false); acting.current = false;
+    const refresh = async () => {
+      await load();
+      if (!cancelled) timer = setTimeout(refresh, 5000);
+    };
+    void refresh();
+    return () => { cancelled = true; clearTimeout(timer); requestId.current++; caseVersion.current++; };
+  }, [load]);
 
-  if (!c) return <p className="text-ink-soft">Loading…</p>;
+  if (!c || c.id !== id) return (
+    <div>
+      <Link to="/cases" className="text-sm text-ink-soft hover:text-ink">← Cases</Link>
+      {loadError ? (
+        <>
+          <p className="text-sm text-clay mt-4" role="alert">{loadError}</p>
+          <button className="btn mt-2" type="button" onClick={() => { setLoadError(null); void load(); }}>Retry</button>
+        </>
+      ) : <p className="text-ink-soft mt-4">Loading…</p>}
+    </div>
+  );
 
-  const act = async (path: string, body: unknown) => {
+  const act = async (path: string, body: unknown, onSuccess?: () => void) => {
+    if (acting.current) return;
+    const version = caseVersion.current;
+    acting.current = true;
     setBusy(true); setError(null);
-    try { await api(path, { method: "POST", body: JSON.stringify(body) }); await load(); return true; }
-    catch (ex) { setError((ex as Error).message); await load(); return false; }
-    finally { setBusy(false); }
+    try {
+      try {
+        await api(path, { method: "POST", body: JSON.stringify(body) });
+        if (version !== caseVersion.current) return;
+        onSuccess?.();
+      } catch (ex) {
+        if (version !== caseVersion.current) return;
+        setError((ex as Error).message);
+      }
+      // A refresh failure must not turn a successful send into a failed send.
+      await load();
+    } finally {
+      if (version === caseVersion.current) { acting.current = false; setBusy(false); }
+    }
   };
   const missing = c.requirements.filter((r) => r.status === "missing");
   const open = !["resolved", "escalated", "abandoned"].includes(c.state);
@@ -90,13 +145,14 @@ export function CaseDetail() {
               )
             ))}
           </ol>
-          <button className="mt-4 text-xs text-ink-soft hover:text-ink" onClick={() => setShowTools(!showTools)}>{showTools ? "Hide" : "Show"} every agent step</button>
+          <button className="mt-4 text-xs text-ink-soft hover:text-ink" onClick={() => setShowTools((shown) => !shown)}>{showTools ? "Hide" : "Show"} every agent step</button>
 
-          {error && <p className="mt-4 text-sm text-clay">{error}</p>}
-          <form className="mt-8 border-t border-line pt-6" onSubmit={async (e) => { e.preventDefault(); if (!reply.trim()) return; if (await act(`/v1/cases/${c.id}/messages`, { text: reply })) setReply(""); }}>
+          {loadError && <p className="mt-4 text-sm text-clay" role="alert">Could not refresh the case: {loadError}</p>}
+          {error && <p className="mt-4 text-sm text-clay" role="alert">{error}</p>}
+          <form className="mt-8 border-t border-line pt-6" onSubmit={async (e) => { e.preventDefault(); if (!reply.trim()) return; await act(`/v1/cases/${c.id}/messages`, { text: reply }, () => setReply("")); }}>
             <label className="block text-sm font-medium mb-1" htmlFor="reply">Reply as a person</label>
             <p className="text-sm text-ink-soft mb-2">Sent on the same channel the customer used. The agent keeps working unless you resolve or take the case.</p>
-            <textarea id="reply" className="field min-h-24" value={reply} onChange={(e) => setReply(e.target.value)} />
+            <textarea id="reply" className="field min-h-24" value={reply} disabled={busy} onChange={(e) => setReply(e.target.value)} />
             <div className="flex gap-2 mt-2">
               <button className="btn btn-primary" disabled={busy || !reply.trim()}>Send reply</button>
             </div>
@@ -124,7 +180,7 @@ export function CaseDetail() {
 
           <div>
             <h2 className="text-sm font-semibold mb-2">Orders found</h2>
-            {orders === null ? <p className="text-sm text-ink-soft">Looking…</p> : orders.no_order_system_connected ? (
+            {ordersError ? <p className="text-sm text-clay" role="alert">Could not load orders: {ordersError}</p> : orders === null ? <p className="text-sm text-ink-soft">Looking…</p> : orders.no_order_system_connected ? (
               <p className="text-sm text-ink-soft">No order source connected. Add one in Setup so the agent can check orders itself.</p>
             ) : orders.found.length === 0 ? (
               <p className="text-sm text-ink-soft">Nothing matched in {orders.sources_checked.join(", ")}.</p>

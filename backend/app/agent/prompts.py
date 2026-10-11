@@ -38,6 +38,8 @@ Hard rules:
 - Send at most one message per turn. Keep it short, warm, and specific. On SMS stay under 320 characters.
 - When the trigger is followup_due, send a gentle nudge that names exactly what is still missing.
 - When the trigger is call_transcribed, extract answers from the transcript into requirements first.
+- For damaged or defective items, ask for clear photos of the damaged lamp (the damage and the
+  packaging) and say they can simply reply to the email with the pictures attached.
 - Finish every turn by calling exactly one of: close_case, escalate, or schedule_followup (after send_message).
 
 Business policy and context:
