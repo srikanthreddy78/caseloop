@@ -3,6 +3,7 @@ import { useOutletContext } from "react-router-dom";
 import { api } from "../api";
 import type { Business } from "../types";
 import { OrderSources } from "../components/OrderSources";
+import { Queue } from "../components/Queue";
 
 export function Settings() {
   const { business, setBusiness } = useOutletContext<{ business: Business; setBusiness: (b: Business) => void }>();
@@ -12,6 +13,7 @@ export function Settings() {
     followup_schedule_hours: business.followup_schedule_hours.join(", "),
     max_followups: business.max_followups,
     outbound_webhook_url: business.outbound_webhook_url || "",
+    allowed_origins: (business.allowed_origins || []).join("\n"),
   });
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -22,10 +24,11 @@ export function Settings() {
     e.preventDefault();
     setError(null);
     const hours = form.followup_schedule_hours.split(",").map((s) => parseInt(s.trim(), 10)).filter((n) => n > 0);
+    const origins = form.allowed_origins.split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
     try {
       const r = await api<{ data: Business }>("/v1/businesses/me", {
         method: "PATCH",
-        body: JSON.stringify({ context_text: form.context_text, escalation_email: form.escalation_email, followup_schedule_hours: hours, max_followups: Number(form.max_followups), outbound_webhook_url: form.outbound_webhook_url || null }),
+        body: JSON.stringify({ context_text: form.context_text, escalation_email: form.escalation_email, followup_schedule_hours: hours, max_followups: Number(form.max_followups), outbound_webhook_url: form.outbound_webhook_url || null, allowed_origins: origins }),
       });
       setBusiness(r.data); setSaved(true); setTimeout(() => setSaved(false), 2000);
     } catch (ex) { setError((ex as Error).message); }
@@ -64,9 +67,15 @@ export function Settings() {
           <input id="wh" className="field" placeholder="https://your-system.example/caseloop" value={form.outbound_webhook_url} onChange={(e) => setForm({ ...form, outbound_webhook_url: e.target.value })} />
           <p className="text-xs text-ink-soft mt-1">Receives case.created and case.state_changed as JSON.</p>
         </div>
+        <div>
+          <label className="block text-sm font-medium mb-1" htmlFor="origins">Websites allowed to use the chat widget (optional)</label>
+          <textarea id="origins" className="field font-mono text-xs min-h-20" placeholder={"https://www.example.com\nhttps://shop.example.com"} value={form.allowed_origins} onChange={(e) => setForm({ ...form, allowed_origins: e.target.value })} />
+          <p className="text-xs text-ink-soft mt-1">One origin per line, scheme and host only. Leave empty to accept chats from any site.</p>
+        </div>
         {error && <p className="text-clay text-sm">{error}</p>}
         <div><button className="btn btn-primary" type="submit">{saved ? "Saved" : "Save changes"}</button></div>
         <div className="border-t border-line pt-6"><OrderSources /></div>
+        <div className="border-t border-line pt-6"><Queue /></div>
       </form>
 
       <aside className="flex flex-col gap-6 text-sm">

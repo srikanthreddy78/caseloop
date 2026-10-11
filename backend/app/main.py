@@ -12,16 +12,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api import chat, dev, orders, public, webhooks_dial, webhooks_resend
+from app.api import chat, dev, jobs, orders, public, webhooks_dial, webhooks_resend
 from app.config import Settings, get_settings
 from app.container import Services, build_services
 from app.jobs import ensure_daily_insights_jobs
+from app.logging_setup import configure_logging
 
 log = logging.getLogger(__name__)
 
 
 def create_app(services: Services | None = None, settings: Settings | None = None) -> FastAPI:
     settings = settings or (services.settings if services else get_settings())
+    configure_logging(settings)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -101,6 +103,7 @@ def create_app(services: Services | None = None, settings: Settings | None = Non
 
     app.include_router(public.router)
     app.include_router(orders.router)
+    app.include_router(jobs.router)
     app.include_router(chat.router)
     app.include_router(webhooks_resend.router)
     app.include_router(webhooks_dial.router)

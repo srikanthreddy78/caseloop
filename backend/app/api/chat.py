@@ -11,7 +11,7 @@ from fastapi import APIRouter, Header, HTTPException, Query, Response, status
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select
 
-from app.api.deps import ServicesDep, SessionDep
+from app.api.deps import RateLimitWidget, ServicesDep, SessionDep
 from app.auth import business_for_widget_key
 from app.cases.service import (
     append_inbound,
@@ -21,6 +21,7 @@ from app.cases.service import (
     open_case,
 )
 from app.models import Business, Case, Channel, ChatSession, Direction, Message
+from app.schemas import normalize_origin
 
 router = APIRouter(prefix="/v1/chat", tags=["chat"])
 
@@ -83,6 +84,13 @@ async def _business_from_key(session: SessionDep, key: str | None) -> Business:
     return business
 
 
+def _check_origin(business: Business, origin: str | None) -> None:
+    """Browsers always send Origin from the widget; a non-empty allow-list must contain it."""
+    allowed = (business.settings or {}).get("allowed_origins") or []
+    if origin and allowed and normalize_origin(origin) not in allowed:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "origin not allowed for this widget")
+
+
 async def _session_or_404(session: SessionDep, token: str) -> tuple[ChatSession, Case]:
     chat = (
         await session.execute(select(ChatSession).where(ChatSession.token == token))
@@ -95,15 +103,22 @@ async def _session_or_404(session: SessionDep, token: str) -> tuple[ChatSession,
     return chat, case
 
 
-@router.post("/sessions", response_model=SessionOut, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/sessions",
+    response_model=SessionOut,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[RateLimitWidget],
+)
 async def start_session(
     payload: StartSessionIn,
     session: SessionDep,
     services: ServicesDep,
     response: Response,
     x_widget_key: Annotated[str | None, Header()] = None,
+    origin: Annotated[str | None, Header()] = None,
 ) -> SessionOut:
     business = await _business_from_key(session, payload.widget_key or x_widget_key)
+    _check_origin(business, origin)
     now = services.clock.now()
     customer = await get_or_create_customer(
         session, business, email=str(payload.email), name=payload.name

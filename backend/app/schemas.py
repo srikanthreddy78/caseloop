@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 
 
 class ErrorBody(BaseModel):
@@ -120,7 +121,25 @@ class BusinessOut(BaseModel):
     followup_schedule_hours: list[int]
     max_followups: int
     outbound_webhook_url: str | None
+    allowed_origins: list[str] = Field(default_factory=list)
     model_config = {"from_attributes": True}
+
+    @model_validator(mode="before")
+    @classmethod
+    def _lift_settings(cls, value: Any) -> Any:
+        """Fields kept in the ``Business.settings`` JSON are surfaced as plain fields."""
+        if isinstance(value, dict) or not hasattr(value, "settings"):
+            return value
+        data = {name: getattr(value, name) for name in cls.model_fields if hasattr(value, name)}
+        data["allowed_origins"] = list((value.settings or {}).get("allowed_origins") or [])
+        return data
+
+
+_ORIGIN_RE = re.compile(r"^https?://[^/\s?#]+$")
+
+
+def normalize_origin(origin: str) -> str:
+    return origin.strip().rstrip("/").lower()
 
 
 class BusinessUpdate(BaseModel):
@@ -134,6 +153,24 @@ class BusinessUpdate(BaseModel):
     outbound_webhook_secret: str | None = Field(default=None, max_length=128)
     dial_number_id: str | None = None
     dial_phone_number: str | None = None
+    allowed_origins: list[str] | None = Field(default=None, max_length=50)
+
+    @field_validator("allowed_origins")
+    @classmethod
+    def _check_origins(cls, value: list[str] | None) -> list[str] | None:
+        """Normalize to scheme://host[:port], drop blanks and duplicates, reject paths."""
+        if value is None:
+            return None
+        cleaned: list[str] = []
+        for raw in value:
+            origin = normalize_origin(raw)
+            if not origin:
+                continue
+            if not _ORIGIN_RE.match(origin):
+                raise ValueError(f"{raw!r} is not an origin (expected scheme://host[:port])")
+            if origin not in cleaned:
+                cleaned.append(origin)
+        return cleaned
 
 
 class CreateCaseIn(BaseModel):

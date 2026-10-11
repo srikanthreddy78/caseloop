@@ -8,7 +8,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, HTTPException, Query, Response, status
 from sqlalchemy import func, select
 
-from app.api.deps import BusinessDep, ServicesDep, SessionDep
+from app.api.deps import BusinessDep, RateLimitApi, ServicesDep, SessionDep
 from app.cases import state as sm
 from app.cases.service import (
     cancel_pending_jobs,
@@ -39,7 +39,7 @@ from app.schemas import (
     TimelineItem,
 )
 
-router = APIRouter(prefix="/v1", tags=["public"])
+router = APIRouter(prefix="/v1", tags=["public"], dependencies=[RateLimitApi])
 
 
 async def _case_or_404(session: SessionDep, business: Business, case_id: uuid.UUID) -> Case:
@@ -62,7 +62,14 @@ async def get_me(business: BusinessDep) -> DataOut[BusinessOut]:
 async def update_me(
     payload: BusinessUpdate, business: BusinessDep, session: SessionDep
 ) -> DataOut[BusinessOut]:
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    changes = payload.model_dump(exclude_unset=True)
+    if "allowed_origins" in changes:
+        # Lives in the settings JSON; reassign the dict so SQLAlchemy sees the change.
+        business.settings = {
+            **(business.settings or {}),
+            "allowed_origins": changes.pop("allowed_origins") or [],
+        }
+    for field, value in changes.items():
         setattr(business, field, value)
     await session.commit()
     await session.refresh(business)
