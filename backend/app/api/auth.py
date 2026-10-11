@@ -75,7 +75,10 @@ async def _send(services: Services, business: Business, to: str, subject: str, t
     if notifier is None:
         log.warning("no notifier configured; sign-in email to %s not sent", to)
         return
-    await notifier.send_email(to=to, subject=subject, text=text, from_email=business.from_email)
+    try:
+        await notifier.send_email(to=to, subject=subject, text=text, from_email=business.from_email)
+    except Exception as exc:  # the link is still logged (and returned in dev); never 500 on email
+        log.warning("sign-in email to %s could not be sent: %s", to, exc)
 
 
 def _set_session_cookie(response: Response, token: str, services: Services) -> None:

@@ -91,7 +91,10 @@ class ResendEmailAdapter:
             "subject": subject,
             "text": text,
         }
-        response = await asyncio.to_thread(resend.Emails.send, params)  # type: ignore[arg-type]
+        try:
+            response = await asyncio.to_thread(resend.Emails.send, params)  # type: ignore[arg-type]
+        except Exception as exc:
+            raise ChannelUnavailable(_explain(exc, params["from"])) from exc
         return _id_of(response)
 
 

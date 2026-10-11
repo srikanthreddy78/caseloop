@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.cases.service import case_timeline
 from app.models import Business, Case
+
+log = logging.getLogger(__name__)
 
 
 class Notifier(Protocol):
@@ -69,6 +72,10 @@ async def notify_escalation(
     subject, text = await build_escalation_package(session, case, base_url)
     if notifier is None:
         return None
-    return await notifier.send_email(
-        to=business.escalation_email, subject=subject, text=text, from_email=business.from_email
-    )
+    try:
+        return await notifier.send_email(
+            to=business.escalation_email, subject=subject, text=text, from_email=business.from_email
+        )
+    except Exception as exc:  # the case is already escalated; a failed email must not fail the job
+        log.warning("escalation email to %s could not be sent: %s", business.escalation_email, exc)
+        return None
