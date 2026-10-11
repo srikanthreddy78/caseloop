@@ -47,8 +47,13 @@ async def create_business(session: SessionDep, payload: CreateBusinessIn) -> tup
     )
     session.add(business)
     await session.flush()
+    # Member emails are stored lowercase so magic-link lookups (also lowercase) always match.
     session.add(
-        TeamMember(business_id=business.id, email=business.escalation_email, role=MemberRole.OWNER)
+        TeamMember(
+            business_id=business.id,
+            email=business.escalation_email.lower(),
+            role=MemberRole.OWNER,
+        )
     )
     await session.commit()
     await session.refresh(business)

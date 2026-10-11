@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import secrets
+import time
 import uuid
 from collections.abc import AsyncIterator
 from datetime import datetime
@@ -26,8 +27,15 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select
 
-from app.api.deps import RateLimitWidget, ServicesDep, SessionDep
-from app.attachments import public_view, resolve_stored, store_uploads
+from app.api.deps import RateLimitWidget, ServicesDep, SessionDep, client_ip, stream_slots
+from app.attachments import (
+    ATTACHMENT_HEADERS,
+    MAX_CASE_BYTES,
+    MAX_CASE_FILES,
+    public_view,
+    resolve_stored,
+    store_uploads,
+)
 from app.auth import business_for_widget_key
 from app.cases.service import (
     append_inbound,
@@ -44,6 +52,9 @@ router = APIRouter(prefix="/v1/chat", tags=["chat"])
 MAX_TEXT = 4000
 STREAM_POLL_SECONDS = 1.0
 STREAM_HEARTBEAT_SECONDS = 25.0
+# A stream ends cleanly after this long; the browser's EventSource reconnects on its own.
+STREAM_MAX_SECONDS = 600.0
+STREAM_RETRY_MS = 3000
 
 
 class StartSessionIn(BaseModel):
@@ -196,7 +207,10 @@ async def start_session(
 
 
 @router.post(
-    "/sessions/{token}/messages", response_model=PollOut, status_code=status.HTTP_201_CREATED
+    "/sessions/{token}/messages",
+    response_model=PollOut,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[RateLimitWidget],
 )
 async def post_message(
     token: str, payload: ChatMessageIn, session: SessionDep, services: ServicesDep
@@ -221,7 +235,7 @@ async def post_message(
     return PollOut(state=case.state, messages=_visible(case.messages, None))
 
 
-@router.get("/sessions/{token}/messages", response_model=PollOut)
+@router.get("/sessions/{token}/messages", response_model=PollOut, dependencies=[RateLimitWidget])
 async def poll_messages(
     token: str,
     session: SessionDep,
@@ -252,8 +266,20 @@ async def post_attachments(
     business = (
         await session.execute(select(Business).where(Business.id == chat.business_id))
     ).scalar_one()
+    have_files = sum(len(m.attachments or []) for m in case.messages)
+    have_bytes = sum(int(a.get("size") or 0) for m in case.messages for a in m.attachments or [])
+    if have_files + len(files) > MAX_CASE_FILES:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"this chat can hold {MAX_CASE_FILES} files in total; {have_files} already sent",
+        )
     data_dir = services.settings.data_dir
-    stored = await store_uploads(files, data_dir / "attachments" / str(case.id), data_dir)
+    stored = await store_uploads(
+        files,
+        data_dir / "attachments" / str(case.id),
+        data_dir,
+        byte_budget=max(0, MAX_CASE_BYTES - have_bytes),
+    )
     images = sum(1 for a in stored if str(a["content_type"]).startswith("image/"))
     if images == len(stored):
         summary = "Sent a photo" if images == 1 else f"Sent {images} photos"
@@ -279,7 +305,11 @@ async def post_attachments(
     return PollOut(state=case.state, messages=_visible(case.messages, None))
 
 
-@router.get("/sessions/{token}/attachments/{message_id}/{index}", response_class=FileResponse)
+@router.get(
+    "/sessions/{token}/attachments/{message_id}/{index}",
+    response_class=FileResponse,
+    dependencies=[RateLimitWidget],
+)
 async def get_attachment(
     token: str, message_id: uuid.UUID, index: int, session: SessionDep, services: ServicesDep
 ) -> FileResponse:
@@ -301,7 +331,7 @@ async def get_attachment(
         media_type=str(att.get("content_type") or "application/octet-stream"),
         filename=str(att.get("filename") or path.name),
         content_disposition_type="inline",
-        headers={"Cache-Control": "private, max-age=3600"},
+        headers=ATTACHMENT_HEADERS,
     )
 
 
@@ -309,7 +339,7 @@ def _sse(event: str, data: Any) -> bytes:
     return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n".encode()
 
 
-@router.get("/sessions/{token}/stream")
+@router.get("/sessions/{token}/stream", dependencies=[RateLimitWidget])
 async def stream_session(
     token: str,
     request: Request,
@@ -320,7 +350,9 @@ async def stream_session(
     """Server-sent events: `message` for each new visible message, `state` when the case moves.
 
     The first event is always the current state. Polls the database every second; a comment
-    line is sent every 25 s so proxies keep the connection open.
+    line is sent every 25 s so proxies keep the connection open. A stream is closed after ten
+    minutes (the browser's EventSource reconnects), and a chat may hold three at once, an IP
+    twenty.
     """
     chat, case = await _session_or_404(session, token)
     chat.last_seen_at = services.clock.now()
@@ -329,41 +361,55 @@ async def stream_session(
     # long-lived stream does not pin a database connection.
     case_id, initial_state = case.id, case.state
     initial = _visible(case.messages, after)
+    slot_keys = {"token": token, "ip": client_ip(request)}
+    if not stream_slots.acquire(slot_keys):
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "too many open streams for this chat; close another tab or poll instead",
+            headers={"Retry-After": "5"},
+        )
 
     async def events() -> AsyncIterator[bytes]:
-        state = initial_state
-        seen: set[uuid.UUID] = set()
-        yield _sse("state", {"state": state})
-        for m in initial:
-            seen.add(m.id)
-            yield _sse("message", m.model_dump(mode="json"))
-        idle = 0.0
-        while not await request.is_disconnected():
-            await asyncio.sleep(STREAM_POLL_SECONDS)
-            idle += STREAM_POLL_SECONDS
-            async with services.session_factory() as db:
-                chat_row = (
-                    await db.execute(select(ChatSession).where(ChatSession.token == token))
-                ).scalar_one_or_none()
-                if chat_row is None or not chat_row.active:
-                    yield _sse("state", {"state": "closed"})
-                    return
-                current = await load_case(db, case_id)
-                if current is None:
-                    return
-                fresh = [m for m in _visible(current.messages, after) if m.id not in seen]
-                new_state = current.state
-            if new_state != state:
-                state = new_state
-                idle = 0.0
-                yield _sse("state", {"state": state})
-            for m in fresh:
+        try:
+            state = initial_state
+            seen: set[uuid.UUID] = set()
+            started = time.monotonic()
+            yield f"retry: {STREAM_RETRY_MS}\n\n".encode()
+            yield _sse("state", {"state": state})
+            for m in initial:
                 seen.add(m.id)
-                idle = 0.0
                 yield _sse("message", m.model_dump(mode="json"))
-            if idle >= STREAM_HEARTBEAT_SECONDS:
-                idle = 0.0
-                yield b": keep-alive\n\n"
+            idle = 0.0
+            while not await request.is_disconnected():
+                if time.monotonic() - started >= STREAM_MAX_SECONDS:
+                    return
+                await asyncio.sleep(STREAM_POLL_SECONDS)
+                idle += STREAM_POLL_SECONDS
+                async with services.session_factory() as db:
+                    chat_row = (
+                        await db.execute(select(ChatSession).where(ChatSession.token == token))
+                    ).scalar_one_or_none()
+                    if chat_row is None or not chat_row.active:
+                        yield _sse("state", {"state": "closed"})
+                        return
+                    current = await load_case(db, case_id)
+                    if current is None:
+                        return
+                    fresh = [m for m in _visible(current.messages, after) if m.id not in seen]
+                    new_state = current.state
+                if new_state != state:
+                    state = new_state
+                    idle = 0.0
+                    yield _sse("state", {"state": state})
+                for m in fresh:
+                    seen.add(m.id)
+                    idle = 0.0
+                    yield _sse("message", m.model_dump(mode="json"))
+                if idle >= STREAM_HEARTBEAT_SECONDS:
+                    idle = 0.0
+                    yield b": keep-alive\n\n"
+        finally:
+            stream_slots.release(slot_keys)
 
     return StreamingResponse(
         events(),

@@ -20,6 +20,8 @@ primary_region = "iad"
   CASELOOP_ENV = "prod"
   CASELOOP_DATA_DIR = "/data"
   PORT = "8000"
+  # Fly's edge proxy is the only way in, so its X-Forwarded-For is trusted for client IPs.
+  FORWARDED_ALLOW_IPS = "*"
 
 [http_service]
   internal_port = 8000

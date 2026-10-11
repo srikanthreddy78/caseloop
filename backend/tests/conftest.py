@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 import pytest_asyncio
 from app.agent.fake_runner import ScriptedAgentRunner, ScriptedAssessor
+from app.api.deps import reset_rate_limits
 from app.channels.fake import FakeAdapter
 from app.channels.registry import ChannelRegistry
 from app.clock import FakeClock
@@ -48,6 +49,12 @@ async def engine(settings: Settings) -> AsyncIterator[AsyncEngine]:
         await conn.run_sync(Base.metadata.create_all)
     yield engine
     await engine.dispose()
+
+
+@pytest.fixture(autouse=True)
+def fresh_rate_limits() -> None:
+    """Every test starts with empty buckets: the limiters are process-wide and keyed by IP."""
+    reset_rate_limits()
 
 
 @pytest_asyncio.fixture(autouse=True)

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Any
 
 from app.clock import FakeClock
 from app.notifications import FakeNotifier
 from httpx import AsyncClient
+
+from tests.conftest import BUSINESS_PAYLOAD
 
 OWNER = "ops@acme-lamps.co"
 LINK_RE = re.compile(r"/dashboard/login\?token=([A-Za-z0-9_-]+)")
@@ -91,6 +94,53 @@ async def test_used_token_is_rejected(
     resp = await client.post("/v1/auth/magic-link/exchange", json={"token": token})
     assert resp.status_code == 401
     assert resp.json()["error"]["code"] == "unauthorized"
+
+
+async def test_concurrent_exchanges_of_one_link_yield_one_session(
+    client: AsyncClient, business: dict[str, Any], notifier: FakeNotifier
+) -> None:
+    resp = await client.post("/v1/auth/magic-link", json={"email": OWNER})
+    assert resp.status_code == 202
+    token = token_from_email(notifier, OWNER)
+    # Each exchange gets its own cookie jar; only one may claim the token.
+    attempts = [AsyncClient(transport=client._transport, base_url="http://test") for _ in range(4)]
+    try:
+        results = await asyncio.gather(
+            *(c.post("/v1/auth/magic-link/exchange", json={"token": token}) for c in attempts)
+        )
+    finally:
+        for c in attempts:
+            await c.aclose()
+    assert sorted(r.status_code for r in results) == [200, 401, 401, 401], [r.text for r in results]
+    winner = next(r for r in results if r.status_code == 200)
+    assert "caseloop_session" in winner.cookies
+
+
+async def test_member_emails_are_stored_lowercase(
+    client: AsyncClient, notifier: FakeNotifier
+) -> None:
+    resp = await client.post(
+        "/dev/businesses",
+        json={
+            **BUSINESS_PAYLOAD,
+            "escalation_email": "Ops@Acme-Lamps.CO",
+            "dial_phone_number": None,
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    resp = await client.post("/v1/auth/magic-link", json={"email": "OPS@acme-lamps.co"})
+    assert resp.status_code == 202
+    resp = await client.post(
+        "/v1/auth/magic-link/exchange",
+        json={"token": token_from_email(notifier, "ops@acme-lamps.co")},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["data"]["member"]["email"] == "ops@acme-lamps.co"
+    resp = await client.post("/v1/team", json={"email": "  Jo@Acme-Lamps.CO ", "name": "Jo"})
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["data"]["email"] == "jo@acme-lamps.co"
+    emails = [m["email"] for m in (await client.get("/v1/team")).json()["data"]]
+    assert emails == ["ops@acme-lamps.co", "jo@acme-lamps.co"]
 
 
 async def test_expired_token_is_rejected(

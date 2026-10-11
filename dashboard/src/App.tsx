@@ -1,19 +1,22 @@
 import { useEffect, useState } from "react";
 import { Link, NavLink, Outlet, useNavigate } from "react-router-dom";
-import { api, getApiKey, setApiKey } from "./api";
+import { ApiError, api, getApiKey, setApiKey } from "./api";
 import type { Business, Member, Session } from "./types";
 
 type Auth =
   | { status: "loading" }
   | { status: "signed_out" }
+  | { status: "error"; message: string }
   | { status: "signed_in"; business: Business; member: Member | null };
 
 export function Shell() {
   const [auth, setAuth] = useState<Auth>({ status: "loading" });
+  const [attempt, setAttempt] = useState(0);
   const navigate = useNavigate();
 
   useEffect(() => {
     let cancelled = false;
+    setAuth({ status: "loading" });
     (async () => {
       try {
         if (getApiKey()) {
@@ -23,16 +26,34 @@ export function Shell() {
         }
         const r = await api<{ data: Session }>("/v1/auth/me");
         if (!cancelled) setAuth({ status: "signed_in", business: r.data.business, member: r.data.member });
-      } catch {
-        setApiKey(null);
-        if (!cancelled) setAuth({ status: "signed_out" });
+      } catch (ex) {
+        if (cancelled) return;
+        // Only a 401 means the credentials are bad. A rate limit, an outage or a flaky network
+        // must not throw away a working key or session.
+        if (ex instanceof ApiError && ex.status === 401) {
+          setApiKey(null);
+          setAuth({ status: "signed_out" });
+        } else {
+          setAuth({ status: "error", message: ex instanceof Error ? ex.message : "Request failed" });
+        }
       }
     })();
     return () => { cancelled = true; };
-  }, []);
+  }, [attempt]);
 
   if (auth.status === "loading") return <main className="min-h-screen" />;
   if (auth.status === "signed_out") return <SignIn />;
+  if (auth.status === "error") {
+    return (
+      <main className="min-h-screen grid place-items-center px-6">
+        <div className="w-full max-w-sm text-center">
+          <h1 className="text-2xl font-semibold mb-1">Could not reach Caseloop</h1>
+          <p className="text-ink-soft mb-6">{auth.message}. You are still signed in; try again in a moment.</p>
+          <button className="btn btn-primary" type="button" onClick={() => setAttempt((n) => n + 1)}>Retry</button>
+        </div>
+      </main>
+    );
+  }
 
   const { business, member } = auth;
   const setBusiness = (b: Business) => setAuth({ status: "signed_in", business: b, member });

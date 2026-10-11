@@ -133,9 +133,14 @@ dashboard's `caseloop_session` cookie (people) and return `{"data": …}`; error
 | GET | `/v1/cases/{id}/orders` | Orders matching a case from every source |
 | GET | `/v1/cases/{id}/attachments/{index}` | Download a customer's photo or PDF (`index` as shown on the timeline) |
 | POST | `/v1/chat/sessions`, `/v1/chat/sessions/{token}/messages` | Used by the widget |
-| POST | `/v1/chat/sessions/{token}/attachments` | Widget photo upload (multipart, up to 5 images or PDFs of 8 MB) |
-| GET | `/v1/chat/sessions/{token}/stream` | Server-sent events for the widget: `message` and `state` events |
+| POST | `/v1/chat/sessions/{token}/attachments` | Widget photo upload (multipart, up to 5 images or PDFs of 8 MB; 25 files / 50 MB per case; file bytes must match the declared type) |
+| GET | `/v1/chat/sessions/{token}/stream` | Server-sent events for the widget: `message` and `state` events (closed after 10 minutes, the browser reconnects; 3 open streams per chat, 20 per IP) |
 | POST | `/webhooks/resend`, `/webhooks/dial` | Provider webhooks |
+
+Rate limits are in-memory per process: 60 requests a minute per API key, dashboard session or
+client IP on the business API; 60 a minute per IP and 600 per widget key on the chat API; sign-in
+links 10 a minute per IP and 3 per address every 10 minutes. Over the limit is a 429 with
+`Retry-After`.
 
 Outbound webhooks (`case.created`, `case.state_changed`) are signed with
 `X-Caseloop-Signature: t=<unix>,v1=<hmac-sha256 of "t.body">` using the business's secret.
@@ -149,8 +154,13 @@ the built dashboard) and runs `alembic upgrade head` before starting uvicorn on 
 - **Fly.io:** `fly launch --copy-config` uses `fly.toml` (one always-on machine, since the scheduler runs in-process; `/data` volume for attachments).
 - **Railway:** `railway.json` uses the Dockerfile, runs migrations before each deploy, and health-checks `/healthz`.
 
-Set the secrets from `.env.example` on the host. CI (`.github/workflows/ci.yml`) runs ruff, mypy,
-pytest against a Postgres service, the dashboard build, and a Docker image build on every push and PR.
+Set the secrets from `.env.example` on the host. Rate limits and access logs key on the client IP,
+which uvicorn only takes from `X-Forwarded-For` when the connection comes from
+`FORWARDED_ALLOW_IPS` (default `127.0.0.1`, so nothing is trusted when the app is exposed
+directly). Behind a platform proxy, set `FORWARDED_ALLOW_IPS` to the proxy's address range
+(Railway's and Fly's edge proxies are the only way in, so `*` is correct there; for your own
+reverse proxy use its IP or CIDR). CI (`.github/workflows/ci.yml`) runs ruff, mypy, pytest
+against a Postgres service, the dashboard build, and a Docker image build on every push and PR.
 
 ## Develop
 
