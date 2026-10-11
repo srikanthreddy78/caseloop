@@ -212,3 +212,36 @@ class InsightSnapshotOut(BaseModel):
     report: dict[str, Any]
     generated_at: datetime
     model_config = {"from_attributes": True}
+
+
+class MagicLinkIn(BaseModel):
+    email: EmailStr
+
+
+class MagicLinkOut(BaseModel):
+    ok: bool = True
+    link: str | None = None
+    """The emailed link, echoed in dev only so local testing needs no mailbox."""
+
+
+class MagicLinkExchangeIn(BaseModel):
+    token: str = Field(min_length=1, max_length=200)
+
+
+class MemberOut(BaseModel):
+    id: uuid.UUID
+    email: str
+    name: str
+    role: str
+    created_at: datetime
+    model_config = {"from_attributes": True}
+
+
+class SessionOut(BaseModel):
+    member: MemberOut
+    business: BusinessOut
+
+
+class InviteIn(BaseModel):
+    email: EmailStr
+    name: str = Field(default="", max_length=200)

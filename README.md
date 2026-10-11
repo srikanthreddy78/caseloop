@@ -67,7 +67,9 @@ make dev                               # http://localhost:8000
 Then:
 
 - Dashboard: build it once with `cd dashboard && npm install && npm run build`, open
-  `http://localhost:8000/dashboard`, paste the API key printed by `create-business`.
+  `http://localhost:8000/dashboard`, and sign in with the `--escalation-email` address (the
+  business owner). A single-use link is emailed through Resend; in dev the link is also
+  logged and shown on screen, so no mailbox is needed. Owners add teammates under Setup → Team.
 - Chat widget: open `widget/example.html#<widget_public_key>` in a browser.
 - Simulate an inbound email without any provider (dev only):
 
@@ -102,11 +104,15 @@ For local testing expose port 8000 with a tunnel such as ngrok.
 
 ## API
 
-All business endpoints take `Authorization: Bearer <api_key>` and return `{"data": …}`;
-errors are `{"error": {"code", "message"}}`.
+All business endpoints take `Authorization: Bearer <api_key>` (integrations) or the
+dashboard's `caseloop_session` cookie (people) and return `{"data": …}`; errors are
+`{"error": {"code", "message"}}`.
 
 | Method | Path | Purpose |
 |---|---|---|
+| POST | `/v1/auth/magic-link`, `/v1/auth/magic-link/exchange`, `/v1/auth/logout` | Email a sign-in link, turn it into a session cookie, sign out |
+| GET | `/v1/auth/me` | Signed-in member and their business |
+| GET / POST / DELETE | `/v1/team`, `/v1/team/{id}` | List, add (owners), remove (owners) team members |
 | GET / PATCH | `/v1/businesses/me` | Policy text, follow-up schedule, hand-off email, webhook URL |
 | GET | `/v1/cases?state=open,gathering&limit=&offset=` | List cases |
 | POST | `/v1/cases` | Open a case from any source |

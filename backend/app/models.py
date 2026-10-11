@@ -300,3 +300,49 @@ class Order(TimestampMixin, Base):
     notes: Mapped[str | None] = mapped_column(Text)
     raw: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class MemberRole(StrEnum):
+    OWNER = "owner"
+    MEMBER = "member"
+
+
+class TeamMember(TimestampMixin, Base):
+    __tablename__ = "team_members"
+    __table_args__ = (
+        UniqueConstraint("business_id", "email", name="uq_team_member_business_email"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_col()
+    business_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("businesses.id", ondelete="CASCADE"))
+    email: Mapped[str] = mapped_column(String(320))
+    name: Mapped[str] = mapped_column(String(200), default="")
+    role: Mapped[str] = mapped_column(String(16), default=MemberRole.MEMBER)
+
+    business: Mapped[Business] = relationship(lazy="selectin")
+
+
+class LoginToken(TimestampMixin, Base):
+    __tablename__ = "login_tokens"
+
+    id: Mapped[uuid.UUID] = _uuid_col()
+    team_member_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("team_members.id", ondelete="CASCADE")
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class DashboardSession(TimestampMixin, Base):
+    __tablename__ = "dashboard_sessions"
+
+    id: Mapped[uuid.UUID] = _uuid_col()
+    team_member_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("team_members.id", ondelete="CASCADE")
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    member: Mapped[TeamMember] = relationship(lazy="selectin")

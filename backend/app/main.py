@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api import chat, dev, orders, public, webhooks_dial, webhooks_resend
+from app.api import auth, chat, dev, orders, public, webhooks_dial, webhooks_resend
 from app.config import Settings, get_settings
 from app.container import Services, build_services
 from app.jobs import ensure_daily_insights_jobs
@@ -52,7 +52,8 @@ def create_app(services: Services | None = None, settings: Settings | None = Non
     app = FastAPI(title="Caseloop", version="0.1.0", lifespan=lifespan)
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=[settings.base_url, "http://localhost:5173"],
+        allow_credentials=True,
         allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["*"],
     )
@@ -100,6 +101,7 @@ def create_app(services: Services | None = None, settings: Settings | None = Non
         return {"status": "ok"}
 
     app.include_router(public.router)
+    app.include_router(auth.router)
     app.include_router(orders.router)
     app.include_router(chat.router)
     app.include_router(webhooks_resend.router)

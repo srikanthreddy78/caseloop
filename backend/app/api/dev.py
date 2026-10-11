@@ -11,7 +11,7 @@ from app.api.deps import ServicesDep, SessionDep
 from app.auth import generate_api_key, generate_widget_key, hash_api_key, key_prefix
 from app.cases.service import get_or_create_customer, ingest_inbound
 from app.clock import FakeClock
-from app.models import Business, Channel
+from app.models import Business, Channel, MemberRole, TeamMember
 from app.orders.email_forward import business_for_forward_address, import_forwarded_email
 from app.schemas import (
     BusinessOut,
@@ -44,6 +44,10 @@ async def create_business(session: SessionDep, payload: CreateBusinessIn) -> tup
         dial_number_id=payload.dial_number_id,
     )
     session.add(business)
+    await session.flush()
+    session.add(
+        TeamMember(business_id=business.id, email=business.escalation_email, role=MemberRole.OWNER)
+    )
     await session.commit()
     await session.refresh(business)
     return business, api_key
