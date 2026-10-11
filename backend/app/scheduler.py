@@ -7,6 +7,7 @@ import logging
 import traceback
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 
 from sqlalchemy import select, update
@@ -19,6 +20,7 @@ from app.models import Job, JobStatus
 log = logging.getLogger(__name__)
 
 MAX_ATTEMPTS = 3
+STALE_RUNNING_MINUTES = 10
 
 
 @dataclass
@@ -60,9 +62,25 @@ class Scheduler:
         await session.commit()
         return jobs
 
+    async def reclaim_stale(self, session: AsyncSession) -> int:
+        """Jobs a dead process left as running go back to pending so they are retried."""
+        cutoff = self.clock.now() - timedelta(minutes=STALE_RUNNING_MINUTES)
+        result = await session.execute(
+            update(Job)
+            .where(Job.status == JobStatus.RUNNING, Job.locked_at < cutoff)
+            .values(
+                status=JobStatus.PENDING, locked_at=None, last_error="reclaimed after a stale run"
+            )
+        )
+        await session.commit()
+        return int(getattr(result, "rowcount", 0) or 0)
+
     async def run_due_jobs(self, limit: int = 10) -> int:
         """Run every due job once. Returns how many ran. Safe to call from tests and the demo."""
         async with self.session_factory() as session:
+            reclaimed = await self.reclaim_stale(session)
+            if reclaimed:
+                log.warning("reclaimed %d stale running job(s)", reclaimed)
             jobs = await self._claim_due(session, limit)
         for job in jobs:
             await self._run_one(job)
