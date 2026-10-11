@@ -121,7 +121,7 @@ def create_app(services: Services | None = None, settings: Settings | None = Non
     async def widget_js() -> FileResponse:
         return FileResponse(
             widget_path,
-            media_type="application/javascript",
+            media_type="application/javascript; charset=utf-8",
             headers={"Cache-Control": "public, max-age=300"},
         )
 
