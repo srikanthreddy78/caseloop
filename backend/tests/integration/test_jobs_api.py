@@ -11,6 +11,14 @@ from tests.conftest import BUSINESS_PAYLOAD
 from tests.integration.test_chat_flow import run_jobs
 
 
+async def exhaust(client) -> int:  # type: ignore[no-untyped-def]
+    """Run a job through all MAX_ATTEMPTS rounds; retries are backed off, so advance the clock."""
+    total = await run_jobs(client)
+    for _ in range(2):
+        total += await run_jobs(client, advance_hours=1)
+    return total
+
+
 async def _enqueue_bogus(services: Services, business_id: str) -> uuid.UUID:
     """A job kind with no handler fails every attempt, so it ends up `failed` after MAX_ATTEMPTS."""
     async with services.session_factory() as session:
@@ -29,7 +37,7 @@ async def test_failed_jobs_are_listed_and_retryable(
     auth_client: AsyncClient, business: dict[str, Any], services: Services
 ) -> None:
     job_id = await _enqueue_bogus(services, business["id"])
-    assert await run_jobs(auth_client) == 3  # MAX_ATTEMPTS rounds, then it gives up
+    assert await exhaust(auth_client) == 3  # MAX_ATTEMPTS rounds, then it gives up
 
     resp = await auth_client.get("/v1/jobs")
     assert resp.status_code == 200, resp.text
@@ -55,7 +63,7 @@ async def test_failed_jobs_are_listed_and_retryable(
     assert again.status_code == 409
 
     # It runs again, fails again, and shows up as failed once more.
-    assert await run_jobs(auth_client) == 3
+    assert await exhaust(auth_client) == 3
     failed = (await auth_client.get("/v1/jobs")).json()["data"]
     assert [j["status"] for j in failed] == ["failed"]
 
@@ -64,7 +72,7 @@ async def test_jobs_are_scoped_to_the_business(
     auth_client: AsyncClient, business: dict[str, Any], services: Services
 ) -> None:
     job_id = await _enqueue_bogus(services, business["id"])
-    await run_jobs(auth_client)
+    await exhaust(auth_client)
 
     other = await auth_client.post(
         "/dev/businesses",
