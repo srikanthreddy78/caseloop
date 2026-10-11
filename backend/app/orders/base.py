@@ -66,7 +66,8 @@ class OrderRecord(BaseModel):
         return source_label(self.source)
 
     def summary(self) -> dict[str, Any]:
-        """What the agent sees: source first, then only decision-relevant fields."""
+        """What the agent sees: source first, then only decision-relevant fields. Never the
+        customer's contact details: the agent already knows who it is talking to."""
         return {
             "source": self.source_label,
             "order_number": self.order_number,
@@ -78,10 +79,29 @@ class OrderRecord(BaseModel):
             "currency": self.currency,
             "items": [{"name": i.name, "quantity": i.quantity} for i in self.items][:10],
             "tracking": self.tracking.model_dump() if self.tracking else None,
-            "customer_email": self.customer_email,
-            "customer_name": self.customer_name,
             "notes": self.notes,
         }
+
+    def unverified_summary(self) -> dict[str, Any]:
+        """What the agent sees for an order whose contact details do not match the customer."""
+        return {
+            "order_number": self.order_number,
+            "status": "found_but_unverified",
+            "verify": "ask the customer to confirm the email or phone used on the order",
+        }
+
+    def belongs_to(self, email: str | None, phone: str | None) -> bool:
+        """True unless the order carries an email or phone and none of them is the customer's.
+
+        An order with no contact details on it (a bare CSV, a tracking page) cannot contradict
+        the customer, so it passes; one that names someone else does not.
+        """
+        checks: list[bool] = []
+        if self.customer_email:
+            checks.append(bool(email) and _norm_email(self.customer_email) == _norm_email(email))
+        if self.customer_phone:
+            checks.append(bool(phone) and _same_phone(self.customer_phone, phone))
+        return not checks or any(checks)
 
 
 class OrderQuery(BaseModel):
@@ -108,6 +128,25 @@ class ProviderNotConfigured(RuntimeError):
 
 def normalize_order_number(value: str) -> str:
     return value.strip().lstrip("#").upper()
+
+
+def _norm_email(value: str | None) -> str:
+    return (value or "").strip().lower()
+
+
+def _digits(value: str | None) -> str:
+    return "".join(ch for ch in (value or "") if ch.isdigit())
+
+
+def _same_phone(a: str, b: str | None) -> bool:
+    """Digits-only comparison; a national number matches its international form."""
+    x, y = _digits(a), _digits(b)
+    if not x or not y:
+        return False
+    if x == y:
+        return True
+    short, long_ = sorted((x, y), key=len)
+    return len(short) >= 7 and long_.endswith(short)
 
 
 def parse_dt(value: Any) -> datetime | None:

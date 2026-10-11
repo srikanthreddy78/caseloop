@@ -2,21 +2,61 @@
 
 from __future__ import annotations
 
+import asyncio
+import re
+import uuid
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
-from app.api.deps import BusinessDep, ServicesDep, SessionDep
+from app.api.deps import BusinessDep, OwnerDep, ServicesDep, SessionDep
 from app.models import Order
+from app.netguard import UnsafeUrlError, assert_public_url
 from app.orders.base import OrderQuery, OrderRecord, source_label
 from app.orders.imports import parse_csv, rows_to_records
-from app.orders.service import LIVE_TYPES, STORED_TYPES
+from app.orders.service import LIVE_TYPES, MASK, STORED_TYPES
 from app.orders.store import row_to_record, source_counts, upsert_orders
 from app.schemas import DataOut
 
 router = APIRouter(prefix="/v1/orders", tags=["orders"])
+
+SHOP_RE = re.compile(r"^[a-z0-9-]+\.myshopify\.com$")
+# The keys that say *where* a source sends requests. A kept secret never follows a new destination.
+DESTINATION_KEYS: dict[str, tuple[str, ...]] = {
+    "shopify": ("shop",),
+    "custom_api": ("url_template", "email_url_template"),
+    "tracking_page": ("url_template", "email_url_template"),
+    "amazon": ("marketplace_id",),
+}
+
+
+def _invalid(message: str) -> HTTPException:
+    return HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, message)
+
+
+async def _validate_destination(cfg: dict[str, Any], *, allow_localhost: bool) -> None:
+    """Normalize and check the destination fields in place; 422 on anything we would not call."""
+    kind = cfg["type"]
+    if kind == "shopify":
+        shop = re.sub(r"^https?://", "", str(cfg.get("shop") or "").strip().lower()).rstrip("/")
+        if not SHOP_RE.fullmatch(shop):
+            raise _invalid("shop must look like acme.myshopify.com")
+        cfg["shop"] = shop
+    elif kind in ("custom_api", "tracking_page"):
+        for key in DESTINATION_KEYS[kind]:
+            if not cfg.get(key):
+                cfg.pop(key, None)
+                continue
+            url = str(cfg[key]).strip()
+            try:
+                await asyncio.to_thread(assert_public_url, url, allow_localhost=allow_localhost)
+            except UnsafeUrlError as exc:
+                raise _invalid(f"{key}: {exc}") from exc
+            cfg[key] = url
+        if "{order_number}" not in str(cfg.get("url_template") or ""):
+            raise _invalid("url_template must contain {order_number}")
 
 
 class OrderOut(BaseModel):
@@ -120,23 +160,49 @@ async def get_sources(
 
 @router.put("/sources", response_model=DataOut[list[dict[str, Any]]])
 async def put_sources(
-    payload: SourcesIn, business: BusinessDep, session: SessionDep, services: ServicesDep
+    payload: SourcesIn,
+    owner: OwnerDep,
+    business: BusinessDep,
+    session: SessionDep,
+    services: ServicesDep,
 ) -> DataOut[list[dict[str, Any]]]:
-    """Replace the configured live sources. Masked secrets ('••••') keep their previous value."""
-    previous = {i: c for i, c in enumerate(business.settings.get("order_sources", []) or [])}
+    """Replace the configured live sources. Owners only.
+
+    Every source carries a stable ``id``. A masked secret ('••••') keeps the stored value of the
+    source with the same id, but only while that source still points at the same destination:
+    a token must be typed again to follow a new shop or URL.
+    """
+    previous = {
+        str(c["id"]): c for c in (business.settings.get("order_sources", []) or []) if c.get("id")
+    }
+    used_ids: set[str] = set()
     cleaned: list[dict[str, Any]] = []
-    for i, cfg in enumerate(payload.order_sources):
+    for cfg in payload.order_sources:
         kind = str(cfg.get("type", ""))
         if kind not in LIVE_TYPES:
-            raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_CONTENT, f"unknown source type {kind!r}"
-            )
-        merged = dict(cfg)
-        old = previous.get(i, {})
-        for key, value in cfg.items():
-            if value == "••••" and key in old:
+            raise _invalid(f"unknown source type {kind!r}")
+        merged = {k: v for k, v in cfg.items() if k != "label"}
+        merged["type"] = kind
+        given_id = cfg.get("id")
+        old = previous.get(given_id) if isinstance(given_id, str) else None
+        if old is not None and given_id in used_ids:
+            raise _invalid(f"source id {given_id!r} appears twice")
+        merged["id"] = old["id"] if old is not None else str(uuid.uuid4())
+        used_ids.add(merged["id"])
+        await _validate_destination(merged, allow_localhost=services.settings.is_dev)
+        moved = old is None or any(
+            old.get(k) != merged.get(k) for k in ("type", *DESTINATION_KEYS[kind])
+        )
+        for key, value in list(merged.items()):
+            if value != MASK:
+                continue
+            if old is not None and key in old and not moved:
                 merged[key] = old[key]
-        merged.pop("label", None)
+            else:
+                raise _invalid(
+                    f"{key} must be entered again"
+                    + (": the destination changed" if old is not None else "")
+                )
         cleaned.append(merged)
     settings = dict(business.settings or {})
     settings["order_sources"] = cleaned

@@ -186,14 +186,11 @@ TOOL_SPECS: list[dict[str, Any]] = [
     },
     {
         "name": "lookup_order",
-        "description": "Look the order up in every system the business has connected (Shopify, Amazon, their own site, imported files). Results say which source they came from. Use it before deciding anything that depends on delivery date, order status, tracking, or amount.",
+        "description": "Look the order up in every system the business has connected (Shopify, Amazon, their own site, imported files), always under this customer's own email and phone. Results say which source they came from; an order marked found_but_unverified belongs to different contact details, so ask the customer to confirm before using it. Use it before deciding anything that depends on delivery date, order status, tracking, or amount.",
         "parameters": {
             "type": "object",
-            "properties": {
-                "order_number": {"type": ["string", "null"]},
-                "email": {"type": ["string", "null"]},
-            },
-            "required": ["order_number", "email"],
+            "properties": {"order_number": {"type": ["string", "null"]}},
+            "required": ["order_number"],
             "additionalProperties": False,
         },
     },
@@ -230,6 +227,7 @@ def case_snapshot(ctx: TurnContext, *, recent: int = 20) -> dict[str, Any]:
             "email": ctx.customer.email,
             "phone": ctx.customer.phone,
         },
+        "orders": ctx.orders_found,
         "requirements": [
             {
                 "key": r.key,
@@ -427,14 +425,19 @@ class CaseTools:
     ) -> str:
         from app.orders.base import OrderQuery
 
+        # The model never chooses whose orders to look at: the case customer's own email and
+        # phone are the only identifiers used, whatever `email` it passed.
+        del email
         ctx = self.ctx
         if ctx.orders is None:
             return json.dumps(
                 {"found": [], "sources_checked": [], "no_order_system_connected": True}
             )
-        query = OrderQuery(order_number=order_number or None, email=email or ctx.customer.email)
+        query = OrderQuery(
+            order_number=order_number or None, email=ctx.customer.email, phone=ctx.customer.phone
+        )
         result = await ctx.orders.lookup(ctx.session, ctx.business, query, now=ctx.clock.now())
-        summary = result.summary()
+        summary = result.customer_summary(ctx.customer.email, ctx.customer.phone)
         ctx.orders_found = summary["found"]
         await record_event(
             ctx.session,

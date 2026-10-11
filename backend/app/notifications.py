@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime
 from typing import Any, Protocol
@@ -12,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.cases.service import case_timeline
 from app.models import TERMINAL_STATES, Business, Case, CaseState
+from app.netguard import assert_public_url
 
 log = logging.getLogger(__name__)
 
@@ -103,7 +105,8 @@ async def post_slack_alert(business: Business, case: Case, base_url: str) -> boo
         f"{base_url}/dashboard/cases/{case.id}"
     )
     try:
-        async with httpx.AsyncClient(timeout=SLACK_TIMEOUT_SECONDS) as http:
+        await asyncio.to_thread(assert_public_url, url)
+        async with httpx.AsyncClient(timeout=SLACK_TIMEOUT_SECONDS, follow_redirects=False) as http:
             resp = await http.post(url, json={"text": text})
             resp.raise_for_status()
     except Exception as exc:

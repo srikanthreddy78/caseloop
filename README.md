@@ -123,7 +123,7 @@ dashboard's `caseloop_session` cookie (people) and return `{"data": …}`; error
 | POST | `/v1/cases/{id}/resolve`, `/escalate`, `/run-turn` | Human overrides |
 | GET / POST | `/v1/insights/latest`, `/v1/insights/generate` | Insights report |
 | GET / POST | `/v1/orders`, `/v1/orders/import` | Search stored orders, push JSON rows, import CSV |
-| GET / PUT / POST | `/v1/orders/sources`, `/v1/orders/sources/test` | Configure live sources, test a lookup |
+| GET / PUT / POST | `/v1/orders/sources`, `/v1/orders/sources/test` | Configure live sources (PUT: signed-in owners only; secrets come back masked and stay with their source `id`), test a lookup |
 | GET | `/v1/cases/{id}/orders` | Orders matching a case from every source |
 | GET | `/v1/cases/{id}/attachments/{index}` | Download a customer's photo or PDF (`index` as shown on the timeline) |
 | POST | `/v1/chat/sessions`, `/v1/chat/sessions/{token}/messages` | Used by the widget |

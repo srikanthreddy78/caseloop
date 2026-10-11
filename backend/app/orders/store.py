@@ -89,8 +89,15 @@ async def upsert_orders(
 
 
 async def search_orders(
-    session: AsyncSession, business_id: uuid.UUID, query: OrderQuery, limit: int = 10
+    session: AsyncSession,
+    business_id: uuid.UUID,
+    query: OrderQuery,
+    limit: int = 10,
+    *,
+    sources: tuple[str, ...] | None = None,
 ) -> list[Order]:
+    """Stored rows matching the query. ``sources`` restricts which source kinds are returned:
+    rows synced from a live provider are its cache, not an answer in their own right."""
     if query.is_empty():
         return []
     conds = []
@@ -100,12 +107,10 @@ async def search_orders(
         conds.append(Order.customer_email == query.email.lower().strip())
     if query.phone:
         conds.append(Order.customer_phone == query.phone.strip())
-    stmt = (
-        select(Order)
-        .where(Order.business_id == business_id, or_(*conds))
-        .order_by(Order.synced_at.desc())
-        .limit(limit)
-    )
+    stmt = select(Order).where(Order.business_id == business_id, or_(*conds))
+    if sources is not None:
+        stmt = stmt.where(Order.source.in_(sources))
+    stmt = stmt.order_by(Order.synced_at.desc()).limit(limit)
     return list((await session.execute(stmt)).scalars().all())
 
 
