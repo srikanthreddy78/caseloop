@@ -1,0 +1,45 @@
+@import "tailwindcss";
+
+@theme {
+  --color-paper: #f7f6f2;
+  --color-panel: #ffffff;
+  --color-ink: #1b1f1d;
+  --color-ink-soft: #5d635f;
+  --color-line: #dad8d0;
+  --color-line-soft: #e9e7e0;
+  --color-moss: #2e5a46;
+  --color-moss-soft: #e4ede7;
+  --color-clay: #b4432b;
+  --color-clay-soft: #f5e3df;
+  --color-slate: #3b5f8a;
+  --color-slate-soft: #e3eaf3;
+  --color-amber: #b7791f;
+  --color-amber-soft: #f6ecd8;
+  --font-sans: "IBM Plex Sans", system-ui, sans-serif;
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+html { background: var(--color-paper); color: var(--color-ink); }
+body { font-family: var(--font-sans); -webkit-font-smoothing: antialiased; }
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center gap-2 h-9 px-3.5 rounded-md text-sm font-medium border border-line bg-panel;
+    transition: transform 160ms var(--ease-out), background-color 160ms ease, border-color 160ms ease;
+  }
+  .btn:active { transform: scale(0.97); }
+  .btn:disabled { opacity: 0.55; cursor: default; transform: none; }
+  @media (hover: hover) { .btn:hover { background: var(--color-paper); } }
+  .btn-primary { @apply bg-moss text-white border-moss; }
+  @media (hover: hover) { .btn-primary:hover { background: #26503d; } }
+  .btn-danger { @apply text-clay border-clay-soft bg-clay-soft; }
+
+  .field { @apply w-full rounded-md border border-line bg-panel px-3 py-2 text-sm; }
+  .field:focus-visible { outline: 2px solid var(--color-moss); outline-offset: 1px; }
+
+  .row-link { transition: background-color 120ms ease; }
+  @media (hover: hover) { .row-link:hover { background: #fbfaf7; } }
+
+  .bar { transition: width 400ms var(--ease-out); }
+  @media (prefers-reduced-motion: reduce) { .btn, .row-link, .bar { transition: none; } }
+}

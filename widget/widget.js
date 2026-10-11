@@ -77,6 +77,7 @@
     }
     .panel.open { opacity: 1; transform: none; pointer-events: auto; }
 
+    .view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
     .head { display: flex; align-items: flex-start; gap: 12px; padding: 16px 16px 12px; border-bottom: 1px solid var(--line); }
     .head .title { font-weight: 650; font-size: 16px; }
     .head .status { color: var(--muted); font-size: 13px; margin-top: 2px; }

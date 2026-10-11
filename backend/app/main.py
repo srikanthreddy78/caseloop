@@ -10,6 +10,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.api import chat, dev, public, webhooks_dial, webhooks_resend
 from app.config import Settings, get_settings
@@ -53,7 +54,7 @@ def create_app(services: Services | None = None, settings: Settings | None = Non
         CORSMiddleware,
         allow_origins=["*"],
         allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type", "X-API-Key"],
+        allow_headers=["*"],
     )
 
     @app.exception_handler(HTTPException)
@@ -103,7 +104,12 @@ def create_app(services: Services | None = None, settings: Settings | None = Non
     app.include_router(webhooks_resend.router)
     app.include_router(webhooks_dial.router)
 
-    widget_path = Path(__file__).resolve().parents[2] / "widget" / "widget.js"
+    if settings.is_dev:
+        app.include_router(dev.router)
+
+    repo_root = Path(__file__).resolve().parents[2]
+    widget_path = repo_root / "widget" / "widget.js"
+    dashboard_dist = repo_root / "dashboard" / "dist"
 
     @app.get("/widget.js", tags=["meta"], include_in_schema=False)
     async def widget_js() -> FileResponse:
@@ -113,8 +119,21 @@ def create_app(services: Services | None = None, settings: Settings | None = Non
             headers={"Cache-Control": "public, max-age=300"},
         )
 
-    if settings.is_dev:
-        app.include_router(dev.router)
+    if dashboard_dist.is_dir():
+        app.mount(
+            "/dashboard/assets",
+            StaticFiles(directory=dashboard_dist / "assets"),
+            name="dashboard-assets",
+        )
+
+        @app.get("/dashboard/{path:path}", include_in_schema=False)
+        async def dashboard_spa(path: str) -> FileResponse:
+            return FileResponse(dashboard_dist / "index.html")
+
+        @app.get("/dashboard", include_in_schema=False)
+        async def dashboard_root() -> FileResponse:
+            return FileResponse(dashboard_dist / "index.html")
+
     return app
 
 
