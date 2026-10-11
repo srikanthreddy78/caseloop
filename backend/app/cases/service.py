@@ -18,6 +18,7 @@ from app.models import (
     Case,
     CaseState,
     Channel,
+    ChatSession,
     Customer,
     Direction,
     Event,
@@ -422,3 +423,69 @@ async def case_timeline(session: AsyncSession, case_id: uuid.UUID) -> list[dict[
         )
     items.sort(key=lambda i: i["at"])
     return items
+
+
+async def adopt_contact(
+    session: AsyncSession,
+    business: Business,
+    case: Case,
+    *,
+    email: str | None = None,
+    phone: str | None = None,
+) -> Customer:
+    """A case learned a new email or phone for its customer. Attach it, merging with an existing
+    customer row that already owns that contact so one person never becomes two customers."""
+    customer = case.customer
+    email = email.strip().lower() if email else None
+    phone = phone.strip() if phone else None
+    for field, value in (("email", email), ("phone", phone)):
+        if not value or getattr(customer, field) == value:
+            continue
+        if getattr(customer, field):
+            continue  # keep the contact we already verified on this customer
+        other = (
+            await session.execute(
+                select(Customer).where(
+                    Customer.business_id == business.id,
+                    getattr(Customer, field) == value,
+                    Customer.id != customer.id,
+                )
+            )
+        ).scalar_one_or_none()
+        if other is None:
+            setattr(customer, field, value)
+            continue
+        # Merge: move this customer's cases and chats onto the existing row, carry the other contact.
+        other_field = "phone" if field == "email" else "email"
+        carried = getattr(customer, other_field)
+        if carried:
+            setattr(customer, other_field, None)  # release the unique contact before copying it
+            await session.flush()
+        if carried and not getattr(other, other_field):
+            setattr(other, other_field, carried)
+        if not other.name and customer.name:
+            other.name = customer.name
+        await session.execute(
+            update(Case).where(Case.customer_id == customer.id).values(customer_id=other.id)
+        )
+        await session.execute(
+            update(ChatSession)
+            .where(ChatSession.customer_id == customer.id)
+            .values(customer_id=other.id)
+        )
+        await session.flush()
+        await session.delete(customer)
+        await session.flush()
+        case.customer_id = other.id
+        await session.refresh(case)
+        customer = case.customer
+        await record_event(
+            session,
+            business_id=business.id,
+            case_id=case.id,
+            type="customer_merged",
+            actor=Sender.SYSTEM,
+            data={"merged_into": str(other.id), field: value},
+        )
+    await session.flush()
+    return customer

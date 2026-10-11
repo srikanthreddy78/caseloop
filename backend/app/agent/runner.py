@@ -192,6 +192,7 @@ async def run_agent_turn(
                 assessment = None
             if assessment is not None:
                 await apply_assessment(session, case, assessment)
+                await _adopt_contact_from_requirements(ctx)
                 await _prefetch_orders(ctx)
                 await record_event(
                     session,
@@ -420,3 +421,26 @@ async def _satisfy_order_number(ctx: TurnContext, found: list[dict[str, Any]]) -
         actor=Sender.SYSTEM,
         data={"key": "order_number", "value": req.value, "source": verified[0].get("source")},
     )
+
+
+async def _adopt_contact_from_requirements(ctx: TurnContext) -> None:
+    """If the conversation surfaced the customer's email or phone, attach it (merging duplicates)."""
+    values = {
+        r.key: str(r.value)
+        for r in ctx.case.requirements
+        if r.key in ("email", "phone") and r.value
+    }
+    if not values:
+        return
+    from app.cases.service import adopt_contact
+
+    try:
+        ctx.customer = await adopt_contact(
+            ctx.session,
+            ctx.business,
+            ctx.case,
+            email=values.get("email"),
+            phone=values.get("phone"),
+        )
+    except Exception:
+        log.exception("could not adopt contact for case %s", ctx.case.id)

@@ -10,6 +10,7 @@ from app.api import webhooks_resend
 from app.channels.registry import ChannelRegistry
 from app.webhooks.signatures import dial_signature
 from httpx import AsyncClient
+from sqlalchemy import select
 
 from tests.conftest import BUSINESS_PAYLOAD
 
@@ -152,3 +153,59 @@ async def test_sms_falls_back_to_email_after_a_carrier_rejection(
     resent = next(m for m in detail["messages"] if m["id"] == str(msg_id))
     assert resent["channel"] == "email" and resent["meta"]["delivery"] == "sent"
     assert isinstance(Message, type)
+
+
+async def test_learning_an_email_merges_duplicate_customers(
+    auth_client: AsyncClient, services: Any
+) -> None:
+    from app.cases.service import adopt_contact
+    from app.models import Business, Case, Customer
+
+    # The same person: first by email, then by phone.
+    await simulate_email_case(auth_client, "jo@customer-mail.co", "Refund for order 7001 please")
+    resp = await auth_client.post(
+        "/dev/simulate/sms",
+        json={
+            "to": BUSINESS_PAYLOAD["dial_phone_number"],
+            "from_phone": "+15550004444",
+            "body": "my lamp broke",
+        },
+    )
+    sms_case_id = resp.json()["data"]["id"]
+    async with services.session_factory() as session:
+        case = await session.get(Case, uuid.UUID(sms_case_id))
+        business = await session.get(Business, case.business_id)
+        merged = await adopt_contact(session, business, case, email="Jo@customer-mail.co")
+        await session.commit()
+        assert merged.email == "jo@customer-mail.co" and merged.phone == "+15550004444"
+        remaining = (
+            (await session.execute(select(Customer).where(Customer.business_id == business.id)))
+            .scalars()
+            .all()
+        )
+        assert (
+            len(
+                [
+                    c
+                    for c in remaining
+                    if c.email == "jo@customer-mail.co" or c.phone == "+15550004444"
+                ]
+            )
+            == 1
+        )
+    detail = (await auth_client.get(f"/v1/cases/{sms_case_id}")).json()["data"]
+    assert detail["customer"]["email"] == "jo@customer-mail.co"
+
+
+async def simulate_email_case(client: AsyncClient, from_email: str, text: str) -> dict[str, Any]:
+    resp = await client.post(
+        "/dev/simulate/email",
+        json={
+            "to": BUSINESS_PAYLOAD["inbound_email"],
+            "from_email": from_email,
+            "subject": "Help",
+            "text": text,
+        },
+    )
+    assert resp.status_code == 202, resp.text
+    return resp.json()["data"]
