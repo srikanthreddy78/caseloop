@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import uuid
 from dataclasses import dataclass, field
@@ -12,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.cases import state as sm
 from app.cases.service import cancel_pending_jobs, enqueue_job, record_event, transition_case
-from app.channels.base import ChannelUnavailable
+from app.channels.base import ChannelUnavailable, SendResult
 from app.channels.registry import ChannelRegistry
 from app.clock import Clock
 from app.models import (
@@ -28,6 +29,8 @@ from app.models import (
     RequirementStatus,
     Sender,
 )
+
+log = logging.getLogger(__name__)
 
 MAX_TOOL_CALLS = 12
 
@@ -56,6 +59,8 @@ class TurnContext:
     channels: ChannelRegistry
     clock: Clock
     trigger: str
+    orders: Any = None  # app.orders.service.OrderService | None
+    orders_found: list[dict[str, Any]] = field(default_factory=list)
     messages_sent: int = 0
     terminal_tool: str | None = None
     tool_calls: int = 0
@@ -175,6 +180,19 @@ TOOL_SPECS: list[dict[str, Any]] = [
             "type": "object",
             "properties": {"instruction": {"type": "string"}},
             "required": ["instruction"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "lookup_order",
+        "description": "Look the order up in every system the business has connected (Shopify, Amazon, their own site, imported files). Results say which source they came from. Use it before deciding anything that depends on delivery date, order status, tracking, or amount.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "order_number": {"type": ["string", "null"]},
+                "email": {"type": ["string", "null"]},
+            },
+            "required": ["order_number", "email"],
             "additionalProperties": False,
         },
     },
@@ -326,13 +344,18 @@ class CaseTools:
             raise ToolError("message text is empty")
         if ctx.case.channel == Channel.SMS and len(text) > 320:
             raise ToolError("SMS messages must be under 320 characters")
+        delivery_error: str | None = None
+        result = SendResult()
         try:
             adapter = ctx.channels.get(ctx.case.channel)
+            result = await adapter.send(
+                business=ctx.business, case=ctx.case, customer=ctx.customer, text=text
+            )
         except ChannelUnavailable as exc:
-            raise ToolError(str(exc)) from exc
-        result = await adapter.send(
-            business=ctx.business, case=ctx.case, customer=ctx.customer, text=text
-        )
+            delivery_error = str(exc)
+        except Exception as exc:
+            log.exception("delivery failed on case %s via %s", ctx.case.id, ctx.case.channel)
+            delivery_error = f"{type(exc).__name__}: {str(exc)[:300]}"
         now = ctx.clock.now()
         msg = Message(
             case_id=ctx.case.id,
@@ -342,6 +365,9 @@ class CaseTools:
             body_text=text,
             provider_message_id=result.provider_message_id,
             provider_thread_ids=result.thread_ids or {},
+            meta={"delivery": "failed", "error": delivery_error}
+            if delivery_error
+            else {"delivery": "sent"},
         )
         ctx.session.add(msg)
         rfc_id = (result.thread_ids or {}).get("rfc_message_id")
@@ -360,11 +386,21 @@ class CaseTools:
             ctx.session,
             business_id=ctx.business.id,
             case_id=ctx.case.id,
-            type="message_sent",
+            type="delivery_failed" if delivery_error else "message_sent",
             actor=Sender.AGENT,
-            data={"message_id": str(msg.id), "channel": ctx.case.channel},
+            data={"message_id": str(msg.id), "channel": ctx.case.channel, "error": delivery_error},
         )
-        return json.dumps({"ok": True, "message_id": str(msg.id)})
+        if delivery_error:
+            return json.dumps(
+                {
+                    "ok": True,
+                    "delivered": False,
+                    "message_id": str(msg.id),
+                    "note": "Message saved but could not be delivered on this channel right now; the team "
+                    "can resend it from the dashboard. Continue the turn as if it was sent.",
+                }
+            )
+        return json.dumps({"ok": True, "delivered": True, "message_id": str(msg.id)})
 
     async def tool_request_phone_call(self, instruction: str) -> str:
         ctx = self.ctx
@@ -384,6 +420,35 @@ class CaseTools:
             data={"call_id": call_id, "instruction": instruction[:500]},
         )
         return json.dumps({"ok": True, "call_id": call_id})
+
+    async def tool_lookup_order(
+        self, order_number: str | None = None, email: str | None = None
+    ) -> str:
+        from app.orders.base import OrderQuery
+
+        ctx = self.ctx
+        if ctx.orders is None:
+            return json.dumps(
+                {"found": [], "sources_checked": [], "no_order_system_connected": True}
+            )
+        query = OrderQuery(order_number=order_number or None, email=email or ctx.customer.email)
+        result = await ctx.orders.lookup(ctx.session, ctx.business, query, now=ctx.clock.now())
+        summary = result.summary()
+        ctx.orders_found = summary["found"]
+        await record_event(
+            ctx.session,
+            business_id=ctx.business.id,
+            case_id=ctx.case.id,
+            type="order_lookup",
+            actor=Sender.AGENT,
+            data={
+                "query": query.model_dump(exclude_none=True),
+                "found": len(result.orders),
+                "sources": summary["sources_checked"],
+                "errors": result.errors,
+            },
+        )
+        return json.dumps(summary, default=str)
 
     async def tool_add_internal_note(self, text: str) -> str:
         ctx = self.ctx

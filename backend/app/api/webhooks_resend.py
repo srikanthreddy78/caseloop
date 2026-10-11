@@ -18,6 +18,7 @@ from app.channels.email import (
     strip_quoted_reply,
 )
 from app.models import Business, Channel, Message
+from app.orders.email_forward import business_for_forward_address, import_forwarded_email
 from app.webhooks.signatures import InvalidSignature, verify_resend
 
 log = logging.getLogger(__name__)
@@ -57,6 +58,19 @@ async def resend_webhook(
         await session.execute(select(Business).where(Business.inbound_email.in_(recipients)))
     ).scalar_one_or_none()
     if business is None:
+        forward_biz = await business_for_forward_address(session, recipients)
+        if forward_biz is not None:
+            received = await fetch_received_email(email_id)
+            text = (received.get("text") or "").strip() or html_to_text(received.get("html") or "")
+            n = await import_forwarded_email(
+                session,
+                forward_biz,
+                text,
+                extractor=services.orders.extractor,
+                now=services.clock.now(),
+            )
+            await session.commit()
+            return {"status": "orders_imported", "imported": str(n)}
         log.info("resend webhook for unknown recipients %s", recipients)
         return {"status": "ignored", "reason": "no business for recipient"}
 

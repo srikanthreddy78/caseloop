@@ -11,7 +11,7 @@ export interface Case {
   closed_at: string | null; created_at: string; updated_at: string; customer: Customer; requirements: Requirement[];
 }
 export interface CaseDetail extends Case { messages: Message[] }
-export interface TimelineItem { kind: "event" | "message"; at: string; type?: string; actor?: string; data?: Record<string, unknown>; direction?: string; channel?: string; sender?: string; text?: string }
+export interface TimelineItem { kind: "event" | "message"; at: string; type?: string; actor?: string; data?: Record<string, unknown>; direction?: string; channel?: string; sender?: string; text?: string; meta?: Record<string, unknown> | null }
 export interface Business {
   id: string; name: string; slug: string; inbound_email: string; from_email: string; escalation_email: string; widget_public_key: string;
   api_key_prefix: string; dial_phone_number: string | null; context_text: string; followup_schedule_hours: number[]; max_followups: number; outbound_webhook_url: string | null;
@@ -19,3 +19,13 @@ export interface Business {
 export interface Theme { name: string; share_pct: number; example_case_ids: string[]; root_causes: string[]; suggested_fixes: string[] }
 export interface InsightsReport { headline: string; themes: Theme[]; sentiment_trend: string; emerging_issues: string[]; top_escalation_reasons: string[] }
 export interface Snapshot { id: string; period_start: string; period_end: string; case_count: number; model: string; report: InsightsReport; generated_at: string }
+
+export interface OrderOut {
+  source: string; source_label: string; order_number: string; status: string; customer_email: string | null; customer_name: string | null;
+  total: number | null; currency: string | null; ordered_at: string | null; delivered_at: string | null;
+  tracking: { carrier?: string | null; number?: string | null; url?: string | null; status?: string | null } | null; items: { name: string; quantity: number }[]; synced_at?: string | null;
+}
+export interface OrderSummary { source: string; order_number: string; status: string; ordered_at: string | null; shipped_at: string | null; delivered_at: string | null; total: number | null; currency: string | null; items: { name: string; quantity: number }[]; tracking: OrderOut["tracking"]; customer_email: string | null; customer_name: string | null; notes: string | null }
+export interface LookupSummary { found: OrderSummary[]; sources_checked: string[]; errors: { source: string; error: string }[]; no_order_system_connected: boolean }
+export interface SourceConfig { type: string; label?: string; [key: string]: unknown }
+export interface SourcesInfo { configured: SourceConfig[]; stored_counts: Record<string, { count: number; label: string }>; forward_address: string; live_types: string[]; stored_types: string[] }

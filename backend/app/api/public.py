@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, HTTPException, Query, Response, status
 from sqlalchemy import func, select
@@ -22,6 +22,7 @@ from app.cases.service import (
 from app.channels.base import ChannelUnavailable
 from app.insights.service import generate_insights, latest_snapshot
 from app.models import Business, Case, CaseState, Direction, JobKind, Message, Sender
+from app.orders.base import OrderQuery
 from app.schemas import (
     BusinessOut,
     BusinessUpdate,
@@ -303,3 +304,18 @@ async def generate_insights_now(
     await session.commit()
     await session.refresh(snapshot)
     return DataOut(data=InsightSnapshotOut.model_validate(snapshot))
+
+
+@router.get("/cases/{case_id}/orders", response_model=DataOut[dict[str, Any]])
+async def case_orders(
+    case_id: uuid.UUID, business: BusinessDep, session: SessionDep, services: ServicesDep
+) -> DataOut[dict[str, Any]]:
+    """Orders matching this case's customer and order number, from every connected source."""
+    case = await _case_or_404(session, business, case_id)
+    number = next(
+        (str(r.value) for r in case.requirements if r.key == "order_number" and r.value), None
+    )
+    query = OrderQuery(order_number=number, email=case.customer.email, phone=case.customer.phone)
+    result = await services.orders.lookup(session, business, query, now=services.clock.now())
+    await session.commit()
+    return DataOut(data=result.summary())

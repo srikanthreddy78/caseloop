@@ -214,3 +214,26 @@ async def test_create_case_via_api_and_human_actions(
     assert done.status_code == 200 and done.json()["data"]["state"] == "resolved"
     again = await auth_client.post(f"/v1/cases/{case['id']}/resolve", json={})
     assert again.status_code == 409
+
+
+async def test_delivery_failure_is_recorded_not_fatal(
+    auth_client: AsyncClient, channels: ChannelRegistry, clock: FakeClock
+) -> None:
+    from app.channels.base import ChannelUnavailable
+
+    class Broken:
+        channel = "email"
+
+        async def send(self, **kwargs: Any) -> None:
+            raise ChannelUnavailable("domain not verified")
+
+    channels.adapters["email"] = Broken()  # type: ignore[assignment]
+    case = await simulate(auth_client, "The lamp arrived smashed.")
+    await run_jobs(auth_client)
+    case = await get_case(auth_client, case["id"])
+    assert case["state"] == "awaiting_customer", case["state"]
+    outbound = [m for m in case["messages"] if m["direction"] == "outbound"]
+    assert len(outbound) == 1 and outbound[0]["meta"]["delivery"] == "failed"
+    assert "domain not verified" in outbound[0]["meta"]["error"]
+    timeline = (await auth_client.get(f"/v1/cases/{case['id']}/timeline")).json()["data"]
+    assert any(t.get("type") == "delivery_failed" for t in timeline)

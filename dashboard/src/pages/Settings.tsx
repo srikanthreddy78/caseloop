@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useOutletContext } from "react-router-dom";
 import { api } from "../api";
 import type { Business } from "../types";
+import { OrderSources } from "../components/OrderSources";
 
 export function Settings() {
   const { business, setBusiness } = useOutletContext<{ business: Business; setBusiness: (b: Business) => void }>();
@@ -65,6 +66,7 @@ export function Settings() {
         </div>
         {error && <p className="text-clay text-sm">{error}</p>}
         <div><button className="btn btn-primary" type="submit">{saved ? "Saved" : "Save changes"}</button></div>
+        <div className="border-t border-line pt-6"><OrderSources /></div>
       </form>
 
       <aside className="flex flex-col gap-6 text-sm">

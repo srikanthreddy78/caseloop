@@ -2,10 +2,12 @@ import { useCallback, useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api, fmtTime } from "../api";
 import { StatePill } from "../components/StatePill";
-import type { CaseDetail as CaseDetailT, TimelineItem } from "../types";
+import type { CaseDetail as CaseDetailT, LookupSummary, TimelineItem } from "../types";
+import { OrderCard } from "../components/OrderCard";
 
 const EVENT_COPY: Record<string, (d: Record<string, unknown>) => string> = {
   case_created: (d) => `Case opened over ${d.channel}`,
+  order_lookup: (d) => `Checked orders in ${((d.sources as string[] | undefined) || []).join(", ") || "no connected source"}: ${d.found} found`,
   case_assessed: (d) => `Agent read it: ${d.category}, ${d.sentiment}, urgency ${d.urgency}`,
   state_changed: (d) => `Moved from ${String(d.from).replace(/_/g, " ")} to ${String(d.to).replace(/_/g, " ")}${d.reason ? ` (${String(d.reason).replace(/_/g, " ")})` : ""}`,
   followup_scheduled: (d) => `Follow-up in ${d.hours} h: ${d.reason}`,
@@ -13,6 +15,7 @@ const EVENT_COPY: Record<string, (d: Record<string, unknown>) => string> = {
   call_started: () => "Agent placed a phone call",
   call_ended: (d) => `Call ended (${d.status}, ${d.duration_seconds ?? 0}s)`,
   agent_error: (d) => `Agent error: ${d.error}`,
+  delivery_failed: (d) => `Could not deliver on ${d.channel}: ${d.error}`,
 };
 
 export function CaseDetail() {
@@ -22,6 +25,7 @@ export function CaseDetail() {
   const [reply, setReply] = useState("");
   const [busy, setBusy] = useState(false);
   const [showTools, setShowTools] = useState(false);
+  const [orders, setOrders] = useState<LookupSummary | null>(null);
 
   const load = useCallback(async () => {
     const [a, b] = await Promise.all([
@@ -29,6 +33,7 @@ export function CaseDetail() {
       api<{ data: TimelineItem[] }>(`/v1/cases/${id}/timeline`),
     ]);
     setCase(a.data); setTimeline(b.data);
+    api<{ data: LookupSummary }>(`/v1/cases/${id}/orders`).then((r) => setOrders(r.data)).catch(() => setOrders(null));
   }, [id]);
 
   useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, [load]);
@@ -62,7 +67,7 @@ export function CaseDetail() {
               t.kind === "message" ? (
                 <li key={i} className={`rounded-lg border px-4 py-3 ${t.direction === "inbound" ? "border-line bg-panel" : t.direction === "internal" ? "border-dashed border-line bg-paper" : t.sender === "human" ? "border-slate-soft bg-slate-soft/50" : "border-moss-soft bg-moss-soft/50"}`}>
                   <div className="flex justify-between text-xs text-ink-soft mb-1">
-                    <span>{t.direction === "inbound" ? c.customer.name || "Customer" : t.direction === "internal" ? "Internal note" : t.sender === "human" ? "You" : "Agent"} · {t.channel}</span>
+                    <span>{t.direction === "inbound" ? c.customer.name || "Customer" : t.direction === "internal" ? "Internal note" : t.sender === "human" ? "You" : "Agent"} · {t.channel}{t.meta?.delivery === "failed" && <span className="ml-2 text-clay font-medium">not delivered</span>}</span>
                     <span>{fmtTime(t.at)}</span>
                   </div>
                   <div className="whitespace-pre-wrap text-[15px]">{t.text}</div>
@@ -104,6 +109,18 @@ export function CaseDetail() {
                 ))}
               </ul>
             )}
+          </div>
+
+          <div>
+            <h2 className="text-sm font-semibold mb-2">Orders found</h2>
+            {orders === null ? <p className="text-sm text-ink-soft">Looking…</p> : orders.no_order_system_connected ? (
+              <p className="text-sm text-ink-soft">No order source connected. Add one in Setup so the agent can check orders itself.</p>
+            ) : orders.found.length === 0 ? (
+              <p className="text-sm text-ink-soft">Nothing matched in {orders.sources_checked.join(", ")}.</p>
+            ) : (
+              <div className="flex flex-col gap-2">{orders.found.map((o, i) => <OrderCard key={i} o={o} />)}</div>
+            )}
+            {orders?.errors.map((e, i) => <p key={i} className="text-xs text-clay mt-1">{e.source}: {e.error}</p>)}
           </div>
 
           <dl className="text-sm grid grid-cols-[110px_1fr] gap-y-1.5">

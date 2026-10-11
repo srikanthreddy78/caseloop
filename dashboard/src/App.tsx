@@ -49,6 +49,7 @@ export function Shell() {
         </div>
         <nav className="flex flex-col gap-1">
           <NavLink to="/cases" className={link}>Cases</NavLink>
+          <NavLink to="/orders" className={link}>Orders</NavLink>
           <NavLink to="/insights" className={link}>Insights</NavLink>
           <NavLink to="/settings" className={link}>Setup</NavLink>
         </nav>

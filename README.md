@@ -36,6 +36,21 @@ inbound message ──► case (new) ──► agent turn ──► ask for what
 - One FastAPI process: HTTP API, webhook receivers, and a Postgres-backed job queue
   (agent turns, follow-ups, transcripts, insights, outbound webhooks). No Redis.
 
+## Orders from anywhere
+
+The agent can only resolve what it can see, so Caseloop takes orders from whatever a business
+already has and labels every order with its source (Shopify, Amazon, Your website API, Tracking
+page, Forwarded email, CSV import, Pushed via API). The agent names the source when it uses the
+facts ("I found order 1234 in Shopify, delivered 12 Sep") and uses delivery dates for policy windows.
+
+| Business has… | Connect it by… |
+|---|---|
+| Shopify | Setup → Order sources → shop domain + Admin API token |
+| Their own API or tracking system | Setup → "Your website API": URL pattern with `{order_number}`, optional headers, field mapping. Test it on the Orders page |
+| Only a tracking page on their site | Setup → "Tracking page": page URL pattern; the page is read and extracted |
+| No API at all | Auto-forward order confirmation emails to `orders@<inbound domain>`, or upload a CSV on the Orders page, or `POST /v1/orders` |
+| Amazon | Setup → Amazon (Selling Partner API credentials); CSV export works today |
+
 ## Run it locally
 
 Requirements: Python 3.12+, [uv](https://docs.astral.sh/uv/), Node 20+, Postgres 16
@@ -99,6 +114,9 @@ errors are `{"error": {"code", "message"}}`.
 | POST | `/v1/cases/{id}/messages` | A person replies on the customer's channel |
 | POST | `/v1/cases/{id}/resolve`, `/escalate`, `/run-turn` | Human overrides |
 | GET / POST | `/v1/insights/latest`, `/v1/insights/generate` | Insights report |
+| GET / POST | `/v1/orders`, `/v1/orders/import` | Search stored orders, push JSON rows, import CSV |
+| GET / PUT / POST | `/v1/orders/sources`, `/v1/orders/sources/test` | Configure live sources, test a lookup |
+| GET | `/v1/cases/{id}/orders` | Orders matching a case from every source |
 | POST | `/v1/chat/sessions`, `/v1/chat/sessions/{token}/messages` | Used by the widget |
 | POST | `/webhooks/resend`, `/webhooks/dial` | Provider webhooks |
 

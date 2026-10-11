@@ -11,6 +11,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -268,3 +269,34 @@ class InsightSnapshot(TimestampMixin, Base):
     model: Mapped[str] = mapped_column(String(64))
     report: Mapped[dict[str, Any]] = mapped_column(JSONB)
     generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class Order(TimestampMixin, Base):
+    __tablename__ = "orders"
+    __table_args__ = (
+        UniqueConstraint("business_id", "source", "source_order_id", name="uq_order_source_id"),
+        Index("ix_orders_business_number", "business_id", "order_number"),
+        Index("ix_orders_business_email", "business_id", "customer_email"),
+        Index("ix_orders_business_phone", "business_id", "customer_phone"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_col()
+    business_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("businesses.id", ondelete="CASCADE"))
+    source: Mapped[str] = mapped_column(String(32))
+    source_order_id: Mapped[str] = mapped_column(String(200))
+    order_number: Mapped[str] = mapped_column(String(100))
+    status: Mapped[str] = mapped_column(String(32), default="unknown")
+    customer_email: Mapped[str | None] = mapped_column(String(320))
+    customer_phone: Mapped[str | None] = mapped_column(String(32))
+    customer_name: Mapped[str | None] = mapped_column(String(200))
+    items: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list)
+    total: Mapped[Any | None] = mapped_column(Numeric(12, 2))
+    currency: Mapped[str | None] = mapped_column(String(8))
+    ordered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    shipped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    tracking: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    shipping_address: Mapped[str | None] = mapped_column(Text)
+    notes: Mapped[str | None] = mapped_column(Text)
+    raw: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

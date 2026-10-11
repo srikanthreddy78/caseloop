@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api import chat, dev, public, webhooks_dial, webhooks_resend
+from app.api import chat, dev, orders, public, webhooks_dial, webhooks_resend
 from app.config import Settings, get_settings
 from app.container import Services, build_services
 from app.jobs import ensure_daily_insights_jobs
@@ -100,6 +100,7 @@ def create_app(services: Services | None = None, settings: Settings | None = Non
         return {"status": "ok"}
 
     app.include_router(public.router)
+    app.include_router(orders.router)
     app.include_router(chat.router)
     app.include_router(webhooks_resend.router)
     app.include_router(webhooks_dial.router)

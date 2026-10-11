@@ -76,7 +76,10 @@ class ResendEmailAdapter:
             "text": text,
             "headers": headers,
         }
-        response = await asyncio.to_thread(resend.Emails.send, params)  # type: ignore[arg-type]
+        try:
+            response = await asyncio.to_thread(resend.Emails.send, params)  # type: ignore[arg-type]
+        except Exception as exc:
+            raise ChannelUnavailable(_explain(exc, business.from_email)) from exc
         return SendResult(provider_message_id=_id_of(response))
 
     async def send_email(
@@ -90,6 +93,17 @@ class ResendEmailAdapter:
         }
         response = await asyncio.to_thread(resend.Emails.send, params)  # type: ignore[arg-type]
         return _id_of(response)
+
+
+def _explain(exc: Exception, from_email: str) -> str:
+    text = str(exc)
+    if "domain" in text.lower() and ("verif" in text.lower() or "not found" in text.lower()):
+        domain = from_email.split("@", 1)[-1]
+        return (
+            f"Resend will not send from {from_email}: the domain {domain} is not verified in Resend. "
+            "Verify it under Resend → Domains, or set the business's from_email to a verified address."
+        )
+    return f"Resend rejected the email: {text[:300]}"
 
 
 def _id_of(response: Any) -> str | None:

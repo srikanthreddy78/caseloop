@@ -12,6 +12,7 @@ from app.auth import generate_api_key, generate_widget_key, hash_api_key, key_pr
 from app.cases.service import get_or_create_customer, ingest_inbound
 from app.clock import FakeClock
 from app.models import Business, Channel
+from app.orders.email_forward import business_for_forward_address, import_forwarded_email
 from app.schemas import (
     BusinessOut,
     CaseDetailOut,
@@ -80,6 +81,17 @@ async def simulate_email(
         )
     ).scalar_one_or_none()
     if business is None:
+        forward_biz = await business_for_forward_address(session, [str(payload.to).lower()])
+        if forward_biz is not None:
+            n = await import_forwarded_email(
+                session,
+                forward_biz,
+                payload.text,
+                extractor=services.orders.extractor,
+                now=services.clock.now(),
+            )
+            await session.commit()
+            raise HTTPException(status.HTTP_200_OK, f"orders imported: {n}")
         raise HTTPException(status.HTTP_404_NOT_FOUND, "no business owns that inbound address")
     customer = await get_or_create_customer(
         session, business, email=str(payload.from_email), name=payload.from_name

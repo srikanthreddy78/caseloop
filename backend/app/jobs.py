@@ -31,6 +31,7 @@ async def handle_agent_turn(ctx: JobContext) -> None:
         assessor=s.assessor,
         channels=s.channels,
         clock=ctx.clock,
+        orders=s.orders,
     )
 
 
@@ -57,6 +58,7 @@ async def handle_followup(ctx: JobContext) -> None:
         assessor=s.assessor,
         channels=s.channels,
         clock=ctx.clock,
+        orders=s.orders,
     )
 
 

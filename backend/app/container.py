@@ -20,6 +20,8 @@ from app.config import Settings
 from app.db import SessionFactory, make_engine, make_session_factory
 from app.insights.service import InsightsGenerator, OpenAIInsights, ScriptedInsights
 from app.notifications import FakeNotifier, Notifier
+from app.orders.extract import OpenAIOrderExtractor, OrderExtractor, ScriptedOrderExtractor
+from app.orders.service import OrderService
 from app.scheduler import Scheduler
 
 log = logging.getLogger(__name__)
@@ -35,6 +37,7 @@ class Services:
     runner: AgentRunner
     assessor: Assessor
     insights: InsightsGenerator
+    orders: OrderService
     scheduler: Scheduler
 
 
@@ -57,6 +60,14 @@ def build_insights(settings: Settings) -> InsightsGenerator:
     if settings.agent_runner == "openai" and settings.openai_api_key:
         return OpenAIInsights(AsyncOpenAI(api_key=settings.openai_api_key), settings.openai_model)
     return ScriptedInsights()
+
+
+def build_order_extractor(settings: Settings) -> OrderExtractor:
+    if settings.agent_runner == "openai" and settings.openai_api_key:
+        return OpenAIOrderExtractor(
+            AsyncOpenAI(api_key=settings.openai_api_key), settings.openai_model
+        )
+    return ScriptedOrderExtractor()
 
 
 def build_channels(settings: Settings) -> ChannelRegistry:
@@ -91,6 +102,7 @@ def build_services(
     engine: AsyncEngine | None = None,
     notifier: Notifier | None = None,
     insights: InsightsGenerator | None = None,
+    orders: OrderService | None = None,
 ) -> Services:
     from app.jobs import register_handlers
 
@@ -113,6 +125,7 @@ def build_services(
         runner=runner,
         assessor=assessor,
         insights=insights or build_insights(settings),
+        orders=orders or OrderService(build_order_extractor(settings)),
         scheduler=None,  # type: ignore[arg-type]
     )
     services.scheduler = Scheduler(session_factory, clock, services)

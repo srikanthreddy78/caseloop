@@ -103,6 +103,7 @@ async def run_agent_turn(
     assessor: Assessor,
     channels: ChannelRegistry,
     clock: Clock,
+    orders: Any = None,
 ) -> TurnResult:
     if trigger not in TRIGGERS:
         raise ValueError(f"unknown trigger {trigger!r}")
@@ -146,6 +147,7 @@ async def run_agent_turn(
             channels=channels,
             clock=clock,
             trigger=trigger,
+            orders=orders,
         )
         if trigger in ("inbound_message", "call_transcribed", "manual"):
             try:
@@ -155,6 +157,7 @@ async def run_agent_turn(
                 assessment = None
             if assessment is not None:
                 await apply_assessment(session, case, assessment)
+                await _prefetch_orders(ctx)
                 await record_event(
                     session,
                     business_id=business.id,
@@ -287,3 +290,36 @@ def _hours(h: int) -> Any:
     from datetime import timedelta
 
     return timedelta(hours=h)
+
+
+async def _prefetch_orders(ctx: TurnContext) -> None:
+    """Match orders before the model acts so it sees them in get_case without a tool call."""
+    if ctx.orders is None:
+        return
+    from app.orders.base import OrderQuery
+
+    number = next(
+        (str(r.value) for r in ctx.case.requirements if r.key == "order_number" and r.value),
+        None,
+    )
+    query = OrderQuery(order_number=number, email=ctx.customer.email, phone=ctx.customer.phone)
+    try:
+        result = await ctx.orders.lookup(ctx.session, ctx.business, query, now=ctx.clock.now())
+    except Exception:
+        log.exception("order prefetch failed for case %s", ctx.case.id)
+        return
+    if result.orders or result.errors:
+        ctx.orders_found = result.summary()["found"]
+        await record_event(
+            ctx.session,
+            business_id=ctx.business.id,
+            case_id=ctx.case.id,
+            type="order_lookup",
+            actor=Sender.SYSTEM,
+            data={
+                "query": query.model_dump(exclude_none=True),
+                "found": len(result.orders),
+                "sources": result.summary()["sources_checked"],
+                "errors": result.errors,
+            },
+        )

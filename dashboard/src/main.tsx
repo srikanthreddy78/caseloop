@@ -6,6 +6,7 @@ import { Shell } from "./App";
 import { Cases } from "./pages/Cases";
 import { CaseDetail } from "./pages/CaseDetail";
 import { Insights } from "./pages/Insights";
+import { Orders } from "./pages/Orders";
 import { Settings } from "./pages/Settings";
 
 const router = createBrowserRouter(
@@ -17,6 +18,7 @@ const router = createBrowserRouter(
         { index: true, element: <Navigate to="/cases" replace /> },
         { path: "cases", element: <Cases /> },
         { path: "cases/:id", element: <CaseDetail /> },
+        { path: "orders", element: <Orders /> },
         { path: "insights", element: <Insights /> },
         { path: "settings", element: <Settings /> },
       ],
