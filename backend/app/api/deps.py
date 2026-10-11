@@ -152,9 +152,15 @@ async def rate_limit_api(
     authorization: Annotated[str | None, Header()] = None,
     x_api_key: Annotated[str | None, Header()] = None,
 ) -> None:
-    """Per-business bucket for API-key endpoints; unauthenticated calls share a per-IP bucket."""
+    """One bucket per API key or dashboard session; unauthenticated calls share a per-IP bucket."""
     token = _bearer_token(authorization, x_api_key)
-    key = f"api:{hash_api_key(token)}" if token else _client_key(request)
+    cookie = request.cookies.get(SESSION_COOKIE)
+    if token:
+        key = f"api:{hash_api_key(token)}"
+    elif cookie:
+        key = f"session:{hash_api_key(cookie)}"
+    else:
+        key = _client_key(request)
     if not limiter.allow(key):
         raise _rate_limited()
 
