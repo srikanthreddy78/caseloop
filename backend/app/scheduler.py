@@ -106,7 +106,13 @@ class Scheduler:
             elif job.attempts >= MAX_ATTEMPTS:
                 values = {"status": JobStatus.FAILED, "last_error": error[-4000:]}
             else:
-                values = {"status": JobStatus.PENDING, "last_error": error[-4000:]}
+                delay = timedelta(minutes=min(2**job.attempts, 30))
+                values = {
+                    "status": JobStatus.PENDING,
+                    "last_error": error[-4000:],
+                    "due_at": self.clock.now() + delay,
+                    "locked_at": None,
+                }
             await session.execute(update(Job).where(Job.id == job.id).values(**values))
             await session.commit()
 

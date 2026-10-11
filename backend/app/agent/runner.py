@@ -35,6 +35,28 @@ from app.models import (
 log = logging.getLogger(__name__)
 
 TRIGGERS = ("inbound_message", "followup_due", "call_transcribed", "manual")
+MAX_TURN_ATTEMPTS = 3
+
+
+class TransientProviderError(RuntimeError):
+    """The model provider is temporarily unavailable; the job should retry later."""
+
+
+def is_transient_provider_error(exc: BaseException) -> bool:
+    """429s, 5xx, timeouts, and connection failures are worth retrying; everything else is not."""
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int) and (status == 429 or status >= 500):
+        return True
+    name = type(exc).__name__
+    return name in {
+        "RateLimitError",
+        "APIConnectionError",
+        "APITimeoutError",
+        "InternalServerError",
+        "ConnectError",
+        "ReadTimeout",
+        "TimeoutException",
+    }
 
 
 class AgentRunner(Protocol):
@@ -104,6 +126,7 @@ async def run_agent_turn(
     channels: ChannelRegistry,
     clock: Clock,
     orders: Any = None,
+    attempt: int = 1,
 ) -> TurnResult:
     if trigger not in TRIGGERS:
         raise ValueError(f"unknown trigger {trigger!r}")
@@ -180,6 +203,18 @@ async def run_agent_turn(
             log.warning("turn hit a tool limit on case %s: %s", case.id, exc)
             await _escalate_system(tools, reason="tool_limit", detail=str(exc))
         except Exception as exc:
+            transient = is_transient_provider_error(exc)
+            if transient and attempt < MAX_TURN_ATTEMPTS:
+                # Leave the case untouched; the scheduler retries the job with backoff.
+                log.warning(
+                    "runner %s hit a transient error on case %s (attempt %d): %s",
+                    runner.name,
+                    case.id,
+                    attempt,
+                    str(exc)[:200],
+                )
+                await session.rollback()
+                raise TransientProviderError(str(exc)[:500]) from exc
             log.exception("runner %s failed on case %s", runner.name, case.id)
             await record_event(
                 session,
@@ -187,10 +222,11 @@ async def run_agent_turn(
                 case_id=case.id,
                 type="agent_error",
                 actor=Sender.SYSTEM,
-                data={"runner": runner.name, "error": str(exc)[:1000]},
+                data={"runner": runner.name, "error": str(exc)[:1000], "attempt": attempt},
             )
             if trigger != "followup_due":
-                await _escalate_system(tools, reason="agent_error", detail=str(exc)[:500])
+                reason = "provider_unavailable" if transient else "agent_error"
+                await _escalate_system(tools, reason=reason, detail=str(exc)[:500])
 
         # Post-conditions: every turn must end in a defined state.
         if ctx.terminal_tool is None and not sm.is_terminal(case.state):
@@ -335,6 +371,7 @@ async def _prefetch_orders(ctx: TurnContext) -> None:
     if result.orders or result.errors:
         summary = result.customer_summary(ctx.customer.email, ctx.customer.phone)
         ctx.orders_found = summary["found"]
+        await _satisfy_order_number(ctx, summary["found"])
         await record_event(
             ctx.session,
             business_id=ctx.business.id,
@@ -348,3 +385,26 @@ async def _prefetch_orders(ctx: TurnContext) -> None:
                 "errors": result.errors,
             },
         )
+
+
+async def _satisfy_order_number(ctx: TurnContext, found: list[dict[str, Any]]) -> None:
+    """One verified order for this customer answers the order-number question by itself."""
+    verified = [
+        o for o in found if o.get("status") != "found_but_unverified" and o.get("order_number")
+    ]
+    if len(verified) != 1:
+        return
+    req = next((r for r in ctx.case.requirements if r.key == "order_number"), None)
+    if req is None or req.status == RequirementStatus.PROVIDED:
+        return
+    req.status = RequirementStatus.PROVIDED
+    req.value = str(verified[0]["order_number"])
+    await ctx.session.flush()
+    await record_event(
+        ctx.session,
+        business_id=ctx.business.id,
+        case_id=ctx.case.id,
+        type="requirement_satisfied",
+        actor=Sender.SYSTEM,
+        data={"key": "order_number", "value": req.value, "source": verified[0].get("source")},
+    )

@@ -37,6 +37,7 @@ async def handle_agent_turn(ctx: JobContext) -> None:
         channels=s.channels,
         clock=ctx.clock,
         orders=s.orders,
+        attempt=ctx.job.attempts,
     )
 
 
@@ -64,6 +65,7 @@ async def handle_followup(ctx: JobContext) -> None:
         channels=s.channels,
         clock=ctx.clock,
         orders=s.orders,
+        attempt=ctx.job.attempts,
     )
 
 
