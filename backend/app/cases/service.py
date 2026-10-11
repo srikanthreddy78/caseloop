@@ -97,6 +97,18 @@ async def transition_case(
         actor=actor,
         data={"from": previous, "to": case.state, **(data or {})},
     )
+    business = await session.get(Business, case.business_id)
+    if business is not None and business.outbound_webhook_url:
+        from app.webhooks.outbound import emit_case_event
+
+        await emit_case_event(
+            session,
+            business,
+            event="case.state_changed",
+            case_id=case.id,
+            data={"from": previous, "to": case.state, **(data or {})},
+            now=now,
+        )
 
 
 async def cancel_pending_jobs(
@@ -216,29 +228,104 @@ async def ingest_inbound(
     )
     created = reopened = False
     if case is None:
-        case = Case(
-            business_id=business.id,
-            customer_id=customer.id,
-            channel=channel,
-            subject=subject,
-            state=CaseState.NEW,
+        case = await open_case(
+            session, business, customer, channel=channel, subject=subject, now=now, actor=sender
         )
-        session.add(case)
-        await session.flush()
         created = True
-        await record_event(
-            session,
-            business_id=business.id,
-            case_id=case.id,
-            type="case_created",
-            actor=sender,
-            data={"channel": channel, "subject": subject},
-        )
     elif needs_reopen:
-        await transition_case(
-            session, case, CaseState.GATHERING, actor=sender, now=now, data={"reason": "reopened"}
+        await reopen_case(session, case, now=now, actor=sender)
+        reopened = True
+    return await append_inbound(
+        session,
+        business,
+        case,
+        text=text,
+        now=now,
+        channel=channel,
+        html=html,
+        provider_message_id=provider_message_id,
+        provider_thread_ids=provider_thread_ids,
+        attachments=attachments,
+        meta=meta,
+        sender=sender,
+        schedule_turn=schedule_turn,
+        created=created,
+        reopened=reopened,
+    )
+
+
+async def open_case(
+    session: AsyncSession,
+    business: Business,
+    customer: Customer,
+    *,
+    channel: str,
+    now: datetime,
+    subject: str | None = None,
+    actor: str = Sender.CUSTOMER,
+) -> Case:
+    case = Case(
+        business_id=business.id,
+        customer_id=customer.id,
+        channel=channel,
+        subject=subject,
+        state=CaseState.NEW,
+    )
+    session.add(case)
+    await session.flush()
+    await record_event(
+        session,
+        business_id=business.id,
+        case_id=case.id,
+        type="case_created",
+        actor=actor,
+        data={"channel": channel, "subject": subject},
+    )
+    if business.outbound_webhook_url:
+        from app.webhooks.outbound import emit_case_event
+
+        await emit_case_event(
+            session,
+            business,
+            event="case.created",
+            case_id=case.id,
+            data={"channel": channel, "subject": subject, "customer_id": str(customer.id)},
+            now=now,
         )
-        case.followups_sent = 0
+    return case
+
+
+async def reopen_case(session: AsyncSession, case: Case, *, now: datetime, actor: str) -> None:
+    await transition_case(
+        session, case, CaseState.GATHERING, actor=actor, now=now, data={"reason": "reopened"}
+    )
+    case.followups_sent = 0
+    case.resolution = None
+    case.escalation = None
+
+
+async def append_inbound(
+    session: AsyncSession,
+    business: Business,
+    case: Case,
+    *,
+    text: str,
+    now: datetime,
+    channel: str | None = None,
+    html: str | None = None,
+    provider_message_id: str | None = None,
+    provider_thread_ids: dict[str, Any] | None = None,
+    attachments: list[dict[str, Any]] | None = None,
+    meta: dict[str, Any] | None = None,
+    sender: str = Sender.CUSTOMER,
+    schedule_turn: bool = True,
+    created: bool = False,
+    reopened: bool = False,
+) -> IngestResult:
+    """Add a customer message to a known case and queue the agent. Reopens terminal cases."""
+    channel = channel or case.channel
+    if case.state in TERMINAL_STATES:
+        await reopen_case(session, case, now=now, actor=sender)
         reopened = True
     elif case.state == CaseState.AWAITING_CUSTOMER:
         await cancel_pending_jobs(session, case.id, kinds=(JobKind.FOLLOWUP,))

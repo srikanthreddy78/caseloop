@@ -4,15 +4,17 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
-from app.api import dev, public
+from app.api import chat, dev, public, webhooks_dial, webhooks_resend
 from app.config import Settings, get_settings
 from app.container import Services, build_services
+from app.jobs import ensure_daily_insights_jobs
 
 log = logging.getLogger(__name__)
 
@@ -26,6 +28,10 @@ def create_app(services: Services | None = None, settings: Settings | None = Non
         app.state.services = svc
         task: asyncio.Task[None] | None = None
         if settings.scheduler_enabled and settings.env != "test":
+            try:
+                await ensure_daily_insights_jobs(svc.session_factory, svc.clock.now())
+            except Exception:
+                log.exception("could not schedule insights jobs")
             task = asyncio.create_task(svc.scheduler.run_forever(settings.scheduler_poll_seconds))
         try:
             yield
@@ -93,6 +99,20 @@ def create_app(services: Services | None = None, settings: Settings | None = Non
         return {"status": "ok"}
 
     app.include_router(public.router)
+    app.include_router(chat.router)
+    app.include_router(webhooks_resend.router)
+    app.include_router(webhooks_dial.router)
+
+    widget_path = Path(__file__).resolve().parents[2] / "widget" / "widget.js"
+
+    @app.get("/widget.js", tags=["meta"], include_in_schema=False)
+    async def widget_js() -> FileResponse:
+        return FileResponse(
+            widget_path,
+            media_type="application/javascript",
+            headers={"Cache-Control": "public, max-age=300"},
+        )
+
     if settings.is_dev:
         app.include_router(dev.router)
     return app

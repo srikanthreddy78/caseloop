@@ -11,10 +11,14 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from app.agent.fake_runner import ScriptedAgentRunner, ScriptedAssessor
 from app.agent.openai_runner import OpenAIAgentRunner, OpenAIAssessor
 from app.agent.runner import AgentRunner, Assessor
+from app.channels.dial import DialSmsAdapter, DialVoiceAdapter, make_dial_client
+from app.channels.email import ResendEmailAdapter
 from app.channels.registry import ChannelRegistry
+from app.channels.webchat import StoreOnlyAdapter
 from app.clock import Clock, SystemClock
 from app.config import Settings
 from app.db import SessionFactory, make_engine, make_session_factory
+from app.insights.service import InsightsGenerator, OpenAIInsights, ScriptedInsights
 from app.notifications import FakeNotifier, Notifier
 from app.scheduler import Scheduler
 
@@ -30,6 +34,7 @@ class Services:
     channels: ChannelRegistry
     runner: AgentRunner
     assessor: Assessor
+    insights: InsightsGenerator
     scheduler: Scheduler
 
 
@@ -48,13 +53,31 @@ def build_agent(settings: Settings) -> tuple[AgentRunner, Assessor]:
     return ScriptedAgentRunner(), ScriptedAssessor()
 
 
+def build_insights(settings: Settings) -> InsightsGenerator:
+    if settings.agent_runner == "openai" and settings.openai_api_key:
+        return OpenAIInsights(AsyncOpenAI(api_key=settings.openai_api_key), settings.openai_model)
+    return ScriptedInsights()
+
+
 def build_channels(settings: Settings) -> ChannelRegistry:
-    """Real adapters when their keys exist, fakes otherwise. Later milestones fill this in."""
+    """Real adapters when their keys exist, fakes otherwise (recorded, never delivered)."""
     registry = ChannelRegistry.all_fake()
-    if not settings.resend_api_key:
+    registry.adapters["webchat"] = StoreOnlyAdapter("webchat")
+    registry.adapters["api"] = StoreOnlyAdapter("api")
+    if settings.resend_api_key:
+        email = ResendEmailAdapter(settings.resend_api_key)
+        registry.adapters["email"] = email
+        registry.notifier = email
+    else:
         log.warning("RESEND_API_KEY unset: email is recorded, not delivered")
-    if registry.notifier is None:
         registry.notifier = FakeNotifier()
+    if settings.dial_api_key:
+        client = make_dial_client(settings.dial_api_key, settings.dial_base_url)
+        registry.dial = client
+        registry.adapters["sms"] = DialSmsAdapter(client)
+        registry.voice = DialVoiceAdapter(client)
+    else:
+        log.warning("DIAL_API_KEY unset: SMS and calls are recorded, not placed")
     return registry
 
 
@@ -67,6 +90,7 @@ def build_services(
     assessor: Assessor | None = None,
     engine: AsyncEngine | None = None,
     notifier: Notifier | None = None,
+    insights: InsightsGenerator | None = None,
 ) -> Services:
     from app.jobs import register_handlers
 
@@ -88,6 +112,7 @@ def build_services(
         channels=channels,
         runner=runner,
         assessor=assessor,
+        insights=insights or build_insights(settings),
         scheduler=None,  # type: ignore[arg-type]
     )
     services.scheduler = Scheduler(session_factory, clock, services)

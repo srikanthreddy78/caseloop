@@ -344,9 +344,10 @@ class CaseTools:
             provider_thread_ids=result.thread_ids or {},
         )
         ctx.session.add(msg)
-        if ctx.case.channel == Channel.EMAIL and result.provider_message_id:
+        rfc_id = (result.thread_ids or {}).get("rfc_message_id")
+        if ctx.case.channel == Channel.EMAIL and rfc_id:
             ids = list(ctx.case.email_thread_message_ids or [])
-            ids.append(result.provider_message_id)
+            ids.append(rfc_id)
             ctx.case.email_thread_message_ids = ids
         ctx.case.last_agent_message_at = now
         ctx.messages_sent += 1

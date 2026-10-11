@@ -20,6 +20,7 @@ from app.cases.service import (
     transition_case,
 )
 from app.channels.base import ChannelUnavailable
+from app.insights.service import generate_insights, latest_snapshot
 from app.models import Business, Case, CaseState, Direction, JobKind, Message, Sender
 from app.schemas import (
     BusinessOut,
@@ -30,6 +31,7 @@ from app.schemas import (
     DataOut,
     EscalateIn,
     HumanMessageIn,
+    InsightSnapshotOut,
     ListOut,
     Meta,
     ResolveIn,
@@ -274,3 +276,30 @@ async def run_turn_now(
     )
     await session.commit()
     return {"status": "queued" if job else "already_queued"}
+
+
+@router.get("/insights/latest", response_model=DataOut[InsightSnapshotOut])
+async def get_latest_insights(
+    business: BusinessDep, session: SessionDep
+) -> DataOut[InsightSnapshotOut]:
+    snapshot = await latest_snapshot(session, business)
+    if snapshot is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no insights generated yet")
+    return DataOut(data=InsightSnapshotOut.model_validate(snapshot))
+
+
+@router.post(
+    "/insights/generate",
+    response_model=DataOut[InsightSnapshotOut],
+    status_code=status.HTTP_201_CREATED,
+)
+async def generate_insights_now(
+    business: BusinessDep, session: SessionDep, services: ServicesDep
+) -> DataOut[InsightSnapshotOut]:
+    """Build a fresh report from the last 30 days of cases (runs the model synchronously)."""
+    snapshot = await generate_insights(
+        session, business, now=services.clock.now(), generator=services.insights
+    )
+    await session.commit()
+    await session.refresh(snapshot)
+    return DataOut(data=InsightSnapshotOut.model_validate(snapshot))

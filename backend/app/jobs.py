@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import logging
 import uuid
+from datetime import timedelta
 from typing import Any
 
 from app.agent.runner import run_agent_turn
 from app.cases import state as sm
 from app.cases.service import enqueue_job, load_business, load_case, record_event
+from app.insights.service import generate_insights
+from app.jobs_dial import handle_fetch_call_transcript
 from app.models import JobKind, Sender
 from app.notifications import notify_escalation
 from app.scheduler import JobContext, Scheduler
+from app.webhooks.outbound import deliver_business_webhook
 
 log = logging.getLogger(__name__)
 
@@ -79,10 +83,75 @@ async def handle_notify_escalation(ctx: JobContext) -> None:
         await session.commit()
 
 
+INSIGHTS_EVERY_HOURS = 24
+
+
+async def handle_insights(ctx: JobContext) -> None:
+    """Refresh the business's insights report, then book the next run."""
+    s = ctx.services
+    now = ctx.clock.now()
+    async with ctx.session_factory() as session:
+        business = await load_business(session, ctx.job.business_id)
+        if business is None:
+            return
+        await generate_insights(session, business, now=now, generator=s.insights)
+        await enqueue_job(
+            session,
+            business_id=business.id,
+            kind=JobKind.INSIGHTS,
+            due_at=now + timedelta(hours=INSIGHTS_EVERY_HOURS),
+            payload={"recurring": True},
+        )
+        await session.commit()
+
+
+async def handle_deliver_webhook(ctx: JobContext) -> None:
+    async with ctx.session_factory() as session:
+        business = await load_business(session, ctx.job.business_id)
+        if business is None or not business.outbound_webhook_url:
+            return
+        await deliver_business_webhook(business, ctx.job.payload, now=ctx.clock.now())
+
+
+async def ensure_daily_insights_jobs(session_factory: Any, now: Any) -> int:
+    """Called at startup: every business gets exactly one pending recurring insights job."""
+    from sqlalchemy import select
+
+    from app.models import Business, Job, JobStatus
+
+    created = 0
+    async with session_factory() as session:
+        businesses = (await session.execute(select(Business.id))).scalars().all()
+        for business_id in businesses:
+            pending = await session.execute(
+                select(Job.id)
+                .where(
+                    Job.business_id == business_id,
+                    Job.kind == JobKind.INSIGHTS,
+                    Job.status == JobStatus.PENDING,
+                )
+                .limit(1)
+            )
+            if pending.first() is None:
+                await enqueue_job(
+                    session,
+                    business_id=business_id,
+                    kind=JobKind.INSIGHTS,
+                    due_at=now + timedelta(hours=INSIGHTS_EVERY_HOURS),
+                    payload={"recurring": True},
+                )
+                created += 1
+        await session.commit()
+    return created
+
+
 def register_handlers(scheduler: Scheduler) -> None:
     scheduler.register(JobKind.AGENT_TURN, handle_agent_turn)
     scheduler.register(JobKind.FOLLOWUP, handle_followup)
     scheduler.register(JobKind.NOTIFY_ESCALATION, handle_notify_escalation)
+    scheduler.register(JobKind.FETCH_CALL_TRANSCRIPT, handle_fetch_call_transcript)
+    scheduler.register(JobKind.INSIGHTS, handle_insights)
+    scheduler.register(JobKind.DELIVER_WEBHOOK, handle_deliver_webhook)
 
 
 async def enqueue_manual_turn(

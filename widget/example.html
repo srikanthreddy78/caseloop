@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Acme Lamps — widget example</title>
+  <style>
+    body { margin: 0; font: 17px/1.5 Georgia, serif; color: #222; background: #faf8f2; }
+    main { max-width: 640px; margin: 80px auto; padding: 0 24px; }
+    h1 { font-size: 40px; margin: 0 0 12px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Acme Lamps</h1>
+    <p>This is a stand-in for any page on the business's own site. The chat launcher in the corner comes from one script tag.</p>
+    <p>Set <code>WIDGET_KEY</code> in the URL hash to try it: <code>example.html#pk_...</code></p>
+  </main>
+  <script>
+    const key = location.hash.slice(1);
+    const s = document.createElement("script");
+    s.src = "http://localhost:8000/widget.js";
+    s.dataset.key = key;
+    s.dataset.name = "Acme Lamps";
+    s.dataset.label = "Need help?";
+    s.dataset.color = "#8a3b1e";
+    document.body.appendChild(s);
+  </script>
+</body>
+</html>

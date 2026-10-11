@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from app.channels.base import ChannelAdapter, ChannelUnavailable, VoiceAdapter
 from app.channels.fake import FakeAdapter, FakeVoiceAdapter
@@ -13,6 +14,7 @@ class ChannelRegistry:
     adapters: dict[str, ChannelAdapter] = field(default_factory=dict)
     voice: VoiceAdapter | None = None
     notifier: Notifier | None = None
+    dial: Any = None
 
     def get(self, channel: str) -> ChannelAdapter:
         try:

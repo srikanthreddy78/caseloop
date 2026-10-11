@@ -131,6 +131,7 @@ class BusinessUpdate(BaseModel):
     followup_schedule_hours: list[int] | None = Field(default=None, min_length=1, max_length=10)
     max_followups: int | None = Field(default=None, ge=0, le=10)
     outbound_webhook_url: str | None = Field(default=None, max_length=2000)
+    outbound_webhook_secret: str | None = Field(default=None, max_length=128)
     dial_number_id: str | None = None
     dial_phone_number: str | None = None
 
@@ -200,3 +201,14 @@ class RunJobsIn(BaseModel):
 class RunJobsOut(BaseModel):
     ran: int
     now: datetime
+
+
+class InsightSnapshotOut(BaseModel):
+    id: uuid.UUID
+    period_start: datetime
+    period_end: datetime
+    case_count: int
+    model: str
+    report: dict[str, Any]
+    generated_at: datetime
+    model_config = {"from_attributes": True}
