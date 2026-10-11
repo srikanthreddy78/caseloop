@@ -15,6 +15,7 @@ from app.agent.requirements import canonical_key
 from app.cases import state as sm
 from app.cases.service import cancel_pending_jobs, enqueue_job, record_event, transition_case
 from app.channels.base import ChannelUnavailable, SendResult
+from app.channels.fallback import delivery_channel
 from app.channels.registry import ChannelRegistry
 from app.clock import Clock
 from app.models import (
@@ -342,12 +343,13 @@ class CaseTools:
         text = text.strip()
         if not text:
             raise ToolError("message text is empty")
-        if ctx.case.channel == Channel.SMS and len(text) > 320:
+        channel = delivery_channel(ctx.case, ctx.customer)
+        if channel == Channel.SMS and len(text) > 320:
             raise ToolError("SMS messages must be under 320 characters")
         delivery_error: str | None = None
         result = SendResult()
         try:
-            adapter = ctx.channels.get(ctx.case.channel)
+            adapter = ctx.channels.get(channel)
             result = await adapter.send(
                 business=ctx.business, case=ctx.case, customer=ctx.customer, text=text
             )
@@ -360,7 +362,7 @@ class CaseTools:
         msg = Message(
             case_id=ctx.case.id,
             direction=Direction.OUTBOUND,
-            channel=ctx.case.channel,
+            channel=channel,
             sender=Sender.AGENT,
             body_text=text,
             provider_message_id=result.provider_message_id,

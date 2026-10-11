@@ -24,6 +24,7 @@ from app.cases.service import (
     transition_case,
 )
 from app.channels.base import ChannelUnavailable, SendResult
+from app.channels.fallback import delivery_channel
 from app.insights.service import generate_insights, latest_snapshot
 from app.models import (
     Business,
@@ -227,7 +228,7 @@ async def human_reply(
     """
     case = await _case_or_404(session, business, case_id)
     now = services.clock.now()
-    sent, error = await _deliver(services, business, case, payload.text)
+    sent, error, _channel = await _deliver(services, business, case, payload.text)
     msg = Message(
         case_id=case.id,
         direction=Direction.OUTBOUND,
@@ -280,7 +281,8 @@ async def resend_message(
     if (msg.meta or {}).get("delivery") != "failed":
         raise HTTPException(status.HTTP_409_CONFLICT, "message was already delivered")
     now = services.clock.now()
-    sent, error = await _deliver(services, business, case, msg.body_text)
+    sent, error, channel = await _deliver(services, business, case, msg.body_text)
+    msg.channel = channel
     if error:
         msg.meta = {**msg.meta, "error": error, "last_attempt_at": now.isoformat()}
         await record_event(
@@ -344,17 +346,18 @@ async def resend_message(
 
 async def _deliver(
     services: Any, business: Business, case: Case, text: str
-) -> tuple[SendResult, str | None]:
-    """Send on the case's channel; failures come back as an error string, never raised."""
+) -> tuple[SendResult, str | None, str]:
+    """Send on the case's channel (or its fallback); failures come back as a string, never raised."""
+    channel = delivery_channel(case, case.customer)
     try:
-        adapter = services.channels.get(case.channel)
+        adapter = services.channels.get(channel)
         result = await adapter.send(business=business, case=case, customer=case.customer, text=text)
     except ChannelUnavailable as exc:
-        return SendResult(), str(exc)
+        return SendResult(), str(exc), channel
     except Exception as exc:
-        log.exception("delivery failed on case %s via %s", case.id, case.channel)
-        return SendResult(), f"{type(exc).__name__}: {str(exc)[:300]}"
-    return result, None
+        log.exception("delivery failed on case %s via %s", case.id, channel)
+        return SendResult(), f"{type(exc).__name__}: {str(exc)[:300]}", channel
+    return result, None, channel
 
 
 def _mark_delivered(case: Case, msg: Message, sent: SendResult, now: datetime) -> None:

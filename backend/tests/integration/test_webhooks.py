@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+import uuid
 from typing import Any
 
 import pytest
@@ -113,3 +114,41 @@ async def test_sms_reply_over_limit_is_blocked_by_tool(auth_client: AsyncClient)
     from app.agent import tools as t
 
     assert t.MAX_TOOL_CALLS >= 6
+
+
+async def test_sms_falls_back_to_email_after_a_carrier_rejection(
+    auth_client: AsyncClient, channels: ChannelRegistry, services: Any
+) -> None:
+    from app.channels.fallback import delivery_channel
+    from app.models import Case, Customer, Direction, Message
+
+    # SMS case whose first reply the carrier rejected, and the customer's email is known.
+    resp = await auth_client.post(
+        "/dev/simulate/sms",
+        json={
+            "to": BUSINESS_PAYLOAD["dial_phone_number"],
+            "from_phone": "+15550003333",
+            "body": "lamp cracked, order 4242",
+        },
+    )
+    case_id = resp.json()["data"]["id"]
+    await run_jobs(auth_client)
+    async with services.session_factory() as session:
+        case = await session.get(Case, uuid.UUID(case_id))
+        assert case is not None
+        customer = await session.get(Customer, case.customer_id)
+        assert customer is not None
+        customer.email = "fallback@customer-mail.co"
+        first = next(m for m in case.messages if m.direction == Direction.OUTBOUND)
+        first.meta = {"delivery": "failed", "error": "A2P/10DLC"}
+        await session.commit()
+        await session.refresh(case)
+        assert delivery_channel(case, customer) == "email"
+    msg_id = first.id
+    resend = await auth_client.post(f"/v1/cases/{case_id}/messages/{msg_id}/resend")
+    assert resend.status_code == 200, resend.text
+    assert channels.adapters["email"].sent[-1].to == "fallback@customer-mail.co"  # type: ignore[attr-defined]
+    detail = (await auth_client.get(f"/v1/cases/{case_id}")).json()["data"]
+    resent = next(m for m in detail["messages"] if m["id"] == str(msg_id))
+    assert resent["channel"] == "email" and resent["meta"]["delivery"] == "sent"
+    assert isinstance(Message, type)

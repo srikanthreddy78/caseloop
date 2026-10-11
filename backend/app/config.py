@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     agent_runner: Literal["openai", "scripted"] = "openai"
     openai_api_key: str | None = Field(default=None, validation_alias="OPENAI_API_KEY")
     openai_model: str = "gpt-5.5"
+    # Cheaper model for classification, extraction, and reports; the agent turn uses openai_model.
+    openai_fast_model: str = "gpt-5.4-mini"
 
     resend_api_key: str | None = Field(default=None, validation_alias="RESEND_API_KEY")
     resend_webhook_secret: str | None = Field(

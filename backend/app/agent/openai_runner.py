@@ -18,7 +18,7 @@ from app.models import Business, Case, Direction
 log = logging.getLogger(__name__)
 
 MAX_ROUNDS = 8
-TURN_REASONING = "medium"
+TURN_REASONING = "low"
 ASSESS_REASONING = "low"
 
 
@@ -59,7 +59,7 @@ class OpenAIAgentRunner:
                 tools=cast(Any, _function_tools(tools.specs())),
                 reasoning=cast(Any, {"effort": TURN_REASONING}),
                 store=False,
-                max_output_tokens=4000,
+                max_output_tokens=2500,
             )
             response_ids.append(response.id)
             if response.usage is not None:

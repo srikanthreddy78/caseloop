@@ -51,14 +51,16 @@ def build_agent(settings: Settings) -> tuple[AgentRunner, Assessor]:
             client = AsyncOpenAI(api_key=settings.openai_api_key)
             return (
                 OpenAIAgentRunner(client, settings.openai_model),
-                OpenAIAssessor(client, settings.openai_model, data_dir=settings.data_dir),
+                OpenAIAssessor(client, settings.openai_fast_model, data_dir=settings.data_dir),
             )
     return ScriptedAgentRunner(), ScriptedAssessor()
 
 
 def build_insights(settings: Settings) -> InsightsGenerator:
     if settings.agent_runner == "openai" and settings.openai_api_key:
-        return OpenAIInsights(AsyncOpenAI(api_key=settings.openai_api_key), settings.openai_model)
+        return OpenAIInsights(
+            AsyncOpenAI(api_key=settings.openai_api_key), settings.openai_fast_model
+        )
     return ScriptedInsights()
 
 
