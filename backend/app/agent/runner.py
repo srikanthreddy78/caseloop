@@ -382,9 +382,11 @@ async def _prefetch_orders(ctx: TurnContext) -> None:
     except Exception:
         log.exception("order prefetch failed for case %s", ctx.case.id)
         return
+    ctx.orders_checked = bool(result.sources_checked)
     if result.orders or result.errors:
         summary = result.customer_summary(ctx.customer.email, ctx.customer.phone)
         ctx.orders_found = summary["found"]
+        ctx.orders_checked = bool(summary["sources_checked"])
         await _satisfy_order_number(ctx, summary["found"])
         await record_event(
             ctx.session,

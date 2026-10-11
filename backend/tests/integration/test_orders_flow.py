@@ -491,3 +491,47 @@ async def test_shopify_lookup_uses_the_stored_token(
     assert test.status_code == 200, test.text
     assert route.call_count == 1
     assert route.calls.last.request.headers["X-Shopify-Access-Token"] == "shpat_1"
+
+
+async def test_refund_refused_when_the_order_is_not_the_customers(auth_client: AsyncClient) -> None:
+    """Someone else's order number, or an unknown one, cannot be refunded."""
+    await auth_client.post(
+        "/v1/orders/import",
+        json={
+            "csv": "order_number,email,status,delivered_at,total\n55210,priya@customer-mail.co,delivered,2026-10-05,80.00\n"
+        },
+    )
+    case = await simulate(
+        auth_client,
+        "Refund please for order 55210, the switch is faulty.",
+        from_email="stranger@customer-mail.co",
+    )
+    await run_jobs(auth_client)
+    detail = (await auth_client.get(f"/v1/cases/{case['id']}")).json()["data"]
+    assert detail["state"] != "resolved"
+    timeline = (await auth_client.get(f"/v1/cases/{case['id']}/timeline")).json()["data"]
+    refusals = [
+        t
+        for t in timeline
+        if t.get("type") == "tool_called" and t["data"].get("tool") == "close_case"
+    ]
+    assert refusals and "no order in our records matches" in refusals[-1]["data"]["result"]
+
+
+async def test_refund_allowed_when_the_order_belongs_to_the_customer(
+    auth_client: AsyncClient,
+) -> None:
+    await auth_client.post(
+        "/v1/orders/import",
+        json={
+            "csv": "order_number,email,status,delivered_at,total\n55210,priya@customer-mail.co,delivered,2026-10-05,80.00\n"
+        },
+    )
+    case = await simulate(
+        auth_client,
+        "Refund please for order 55210, the switch is faulty.",
+        from_email="priya@customer-mail.co",
+    )
+    await run_jobs(auth_client)
+    detail = (await auth_client.get(f"/v1/cases/{case['id']}")).json()["data"]
+    assert detail["state"] == "resolved" and detail["resolution"]["verified_order"] == "55210"

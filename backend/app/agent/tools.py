@@ -35,6 +35,19 @@ from app.models import (
 log = logging.getLogger(__name__)
 
 MAX_TOOL_CALLS = 12
+MONEY_RESOLUTIONS = frozenset(
+    {"refund_issued", "replacement_sent", "return_approved", "credit_issued"}
+)
+
+
+def verified_orders(ctx: TurnContext) -> list[dict[str, Any]]:
+    """Orders found in the business's records that belong to this customer (contact matched)."""
+    return [
+        o
+        for o in ctx.orders_found
+        if o.get("status") != "found_but_unverified" and o.get("order_number")
+    ]
+
 
 _PII_PATTERNS = [
     (re.compile(r"\b(?:\d[ -]?){13,19}\b"), "[card number removed]"),
@@ -63,6 +76,7 @@ class TurnContext:
     trigger: str
     orders: Any = None  # app.orders.service.OrderService | None
     orders_found: list[dict[str, Any]] = field(default_factory=list)
+    orders_checked: bool = False
     messages_sent: int = 0
     messages_failed: int = 0  # of messages_sent, how many the channel could not deliver
     terminal_tool: str | None = None
@@ -447,6 +461,7 @@ class CaseTools:
         result = await ctx.orders.lookup(ctx.session, ctx.business, query, now=ctx.clock.now())
         summary = result.customer_summary(ctx.customer.email, ctx.customer.phone)
         ctx.orders_found = summary["found"]
+        ctx.orders_checked = bool(summary["sources_checked"])
         await record_event(
             ctx.session,
             business_id=ctx.business.id,
@@ -526,7 +541,15 @@ class CaseTools:
         missing = _missing_keys(case)
         if missing and resolution_type != "no_action_needed":
             raise ToolError(f"cannot close: requirements still missing: {', '.join(missing)}")
+        if resolution_type in MONEY_RESOLUTIONS and ctx.orders_checked and not verified_orders(ctx):
+            raise ToolError(
+                "cannot issue a refund, replacement, return, or credit: no order in our records "
+                "matches this customer. Ask them to confirm the order number and the email or phone "
+                "used on the order, or escalate if it still cannot be verified."
+            )
         case.resolution = {"type": resolution_type, "notes": notes}
+        if resolution_type in MONEY_RESOLUTIONS and verified_orders(ctx):
+            case.resolution["verified_order"] = verified_orders(ctx)[0].get("order_number")
         await cancel_pending_jobs(ctx.session, case.id)
         await transition_case(
             ctx.session,

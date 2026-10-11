@@ -180,6 +180,11 @@ export function CaseDetail() {
 
           <div>
             <h2 className="text-sm font-semibold mb-2">Orders found</h2>
+            {orders && !orders.no_order_system_connected && (
+              orders.found.some((o) => o.status !== "found_but_unverified")
+                ? <p className="text-xs text-moss font-medium mb-2">Customer verified against order records</p>
+                : <p className="text-xs text-clay font-medium mb-2">Customer not verified: no matching order on this email or phone</p>
+            )}
             {ordersError ? <p className="text-sm text-clay" role="alert">Could not load orders: {ordersError}</p> : orders === null ? <p className="text-sm text-ink-soft">Looking…</p> : orders.no_order_system_connected ? (
               <p className="text-sm text-ink-soft">No order source connected. Add one in Setup so the agent can check orders itself.</p>
             ) : orders.found.length === 0 ? (
