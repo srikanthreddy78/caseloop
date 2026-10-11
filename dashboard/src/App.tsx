@@ -1,41 +1,47 @@
 import { useEffect, useState } from "react";
-import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import { Link, NavLink, Outlet, useNavigate } from "react-router-dom";
 import { api, getApiKey, setApiKey } from "./api";
-import type { Business } from "./types";
+import type { Business, Member, Session } from "./types";
+
+type Auth =
+  | { status: "loading" }
+  | { status: "signed_out" }
+  | { status: "signed_in"; business: Business; member: Member | null };
 
 export function Shell() {
-  const [business, setBusiness] = useState<Business | null>(null);
-  const [key, setKey] = useState(getApiKey() || "");
-  const [error, setError] = useState<string | null>(null);
+  const [auth, setAuth] = useState<Auth>({ status: "loading" });
   const navigate = useNavigate();
 
   useEffect(() => {
-    if (!getApiKey()) return;
-    api<{ data: Business }>("/v1/businesses/me").then((r) => setBusiness(r.data)).catch((e) => { setError(e.message); setApiKey(null); });
+    let cancelled = false;
+    (async () => {
+      try {
+        if (getApiKey()) {
+          const r = await api<{ data: Business }>("/v1/businesses/me");
+          if (!cancelled) setAuth({ status: "signed_in", business: r.data, member: null });
+          return;
+        }
+        const r = await api<{ data: Session }>("/v1/auth/me");
+        if (!cancelled) setAuth({ status: "signed_in", business: r.data.business, member: r.data.member });
+      } catch {
+        setApiKey(null);
+        if (!cancelled) setAuth({ status: "signed_out" });
+      }
+    })();
+    return () => { cancelled = true; };
   }, []);
 
-  if (!business) {
-    return (
-      <main className="min-h-screen grid place-items-center px-6">
-        <form
-          className="w-full max-w-sm"
-          onSubmit={async (e) => {
-            e.preventDefault();
-            setApiKey(key.trim());
-            try { const r = await api<{ data: Business }>("/v1/businesses/me"); setBusiness(r.data); setError(null); navigate("/cases"); }
-            catch (ex) { setError((ex as Error).message); setApiKey(null); }
-          }}
-        >
-          <h1 className="text-2xl font-semibold mb-1">Caseloop</h1>
-          <p className="text-ink-soft mb-6">Paste the API key that was printed when this business was created.</p>
-          <label className="block text-sm text-ink-soft mb-1" htmlFor="key">API key</label>
-          <input id="key" className="field mb-3" value={key} onChange={(e) => setKey(e.target.value)} placeholder="cl_…" autoComplete="off" />
-          {error && <p className="text-clay text-sm mb-3">{error}</p>}
-          <button className="btn btn-primary w-full justify-center" type="submit">Open dashboard</button>
-        </form>
-      </main>
-    );
-  }
+  if (auth.status === "loading") return <main className="min-h-screen" />;
+  if (auth.status === "signed_out") return <SignIn />;
+
+  const { business, member } = auth;
+  const setBusiness = (b: Business) => setAuth({ status: "signed_in", business: b, member });
+  const signOut = async () => {
+    setApiKey(null);
+    try { await api("/v1/auth/logout", { method: "POST" }); } catch { /* already signed out */ }
+    setAuth({ status: "signed_out" });
+    navigate("/");
+  };
 
   const link = ({ isActive }: { isActive: boolean }) =>
     `block px-3 py-2 rounded-md text-sm ${isActive ? "bg-panel font-medium" : "text-ink-soft hover:text-ink"}`;
@@ -53,11 +59,69 @@ export function Shell() {
           <NavLink to="/insights" className={link}>Insights</NavLink>
           <NavLink to="/settings" className={link}>Setup</NavLink>
         </nav>
-        <button className="mt-auto text-left text-sm text-ink-soft hover:text-ink" onClick={() => { setApiKey(null); setBusiness(null); }}>Sign out</button>
+        <div className="mt-auto text-sm">
+          {member && <div className="text-xs text-ink-soft truncate mb-1" title={member.email}>{member.name || member.email}</div>}
+          <button className="text-left text-ink-soft hover:text-ink" onClick={signOut}>Sign out</button>
+        </div>
       </aside>
       <main className="px-10 py-8 max-w-[1120px] w-full">
-        <Outlet context={{ business, setBusiness }} />
+        <Outlet context={{ business, setBusiness, member }} />
       </main>
     </div>
+  );
+}
+
+function SignIn() {
+  const [email, setEmail] = useState("");
+  const [sent, setSent] = useState<{ email: string; link: string | null } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  if (sent) {
+    // In dev the API echoes the emailed link; open it inside this app so it works under vite too.
+    const token = sent.link ? new URL(sent.link).searchParams.get("token") : null;
+    return (
+      <main className="min-h-screen grid place-items-center px-6">
+        <div className="w-full max-w-sm">
+          <h1 className="text-2xl font-semibold mb-1">Check your email</h1>
+          <p className="text-ink-soft mb-6">
+            If <span className="text-ink">{sent.email}</span> belongs to a team, a sign-in link is on its way. It works once and expires in 15 minutes.
+          </p>
+          {token && (
+            <div className="rounded-md border border-amber-soft bg-amber-soft px-3 py-2 text-sm mb-6">
+              <div className="text-amber text-xs font-medium mb-1">Dev mode: the link was also logged by the server</div>
+              <Link className="underline" to={`/login?token=${encodeURIComponent(token)}`}>Open link</Link>
+            </div>
+          )}
+          <button className="text-sm text-ink-soft hover:text-ink" type="button" onClick={() => setSent(null)}>Use a different email</button>
+        </div>
+      </main>
+    );
+  }
+
+  return (
+    <main className="min-h-screen grid place-items-center px-6">
+      <form
+        className="w-full max-w-sm"
+        onSubmit={async (e) => {
+          e.preventDefault();
+          setBusy(true);
+          setError(null);
+          const address = email.trim();
+          try {
+            const r = await api<{ data: { link: string | null } }>("/v1/auth/magic-link", { method: "POST", body: JSON.stringify({ email: address }) });
+            setSent({ email: address, link: r.data.link });
+          } catch (ex) { setError((ex as Error).message); }
+          finally { setBusy(false); }
+        }}
+      >
+        <h1 className="text-2xl font-semibold mb-1">Caseloop</h1>
+        <p className="text-ink-soft mb-6">Enter your work email and we will send you a sign-in link.</p>
+        <label className="block text-sm text-ink-soft mb-1" htmlFor="email">Work email</label>
+        <input id="email" type="email" required autoFocus className="field mb-3" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@company.com" autoComplete="email" />
+        {error && <p className="text-clay text-sm mb-3">{error}</p>}
+        <button className="btn btn-primary w-full justify-center" type="submit" disabled={busy}>{busy ? "Sending…" : "Email me a sign-in link"}</button>
+      </form>
+    </main>
   );
 }

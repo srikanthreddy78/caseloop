@@ -6,11 +6,13 @@ import { Shell } from "./App";
 import { Cases } from "./pages/Cases";
 import { CaseDetail } from "./pages/CaseDetail";
 import { Insights } from "./pages/Insights";
+import { Login } from "./pages/Login";
 import { Orders } from "./pages/Orders";
 import { Settings } from "./pages/Settings";
 
 const router = createBrowserRouter(
   [
+    { path: "/login", element: <Login /> },
     {
       path: "/",
       element: <Shell />,
