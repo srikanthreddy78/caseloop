@@ -85,6 +85,7 @@ async def update_me(
     # These live in the settings JSON; reassign the dict so SQLAlchemy sees the change.
     for key, empty in (
         ("allowed_origins", []),
+        ("prefer_email_over_sms", False),
         ("order_email_senders", []),
         ("slack_webhook_url", None),
     ):
@@ -348,7 +349,7 @@ async def _deliver(
     services: Any, business: Business, case: Case, text: str
 ) -> tuple[SendResult, str | None, str]:
     """Send on the case's channel (or its fallback); failures come back as a string, never raised."""
-    channel = delivery_channel(case, case.customer)
+    channel = delivery_channel(case, case.customer, business)
     try:
         adapter = services.channels.get(channel)
         result = await adapter.send(business=business, case=case, customer=case.customer, text=text)

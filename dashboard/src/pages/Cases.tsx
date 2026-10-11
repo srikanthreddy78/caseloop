@@ -11,6 +11,8 @@ const FILTERS: { label: string; states: CaseState[] | null }[] = [
   { label: "All", states: null },
 ];
 
+const CHANNEL_LABEL: Record<string, string> = { email: "email", webchat: "website chat", sms: "text", voice: "phone call", api: "api" };
+
 function waitingFor(c: Case): string {
   if (c.state === "awaiting_customer") {
     const missing = c.requirements.filter((r) => r.status === "missing").map((r) => r.label.toLowerCase());
@@ -61,7 +63,7 @@ export function Cases() {
               <Link to={`/cases/${c.id}`} className="row-link grid grid-cols-[1fr_180px_220px_90px] gap-4 items-center px-2 py-3 -mx-2 rounded-md">
                 <div className="min-w-0">
                   <div className="font-medium truncate">{c.subject || c.summary || "Untitled case"}</div>
-                  <div className="text-sm text-ink-soft truncate">{c.customer.name || c.customer.email || c.customer.phone} · {c.category || "unclassified"} · {c.channel}</div>
+                  <div className="text-sm text-ink-soft truncate">{c.customer.name || c.customer.email || c.customer.phone} · {c.category || "unclassified"} · {CHANNEL_LABEL[c.channel] || c.channel}</div>
                 </div>
                 <StatePill state={c.state} />
                 <div className="text-sm text-ink-soft truncate">{waitingFor(c)}</div>

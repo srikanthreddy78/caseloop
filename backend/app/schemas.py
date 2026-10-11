@@ -163,6 +163,7 @@ class BusinessUpdate(BaseModel):
     followup_schedule_hours: list[int] | None = Field(default=None, min_length=1, max_length=10)
     max_followups: int | None = Field(default=None, ge=0, le=10)
     outbound_webhook_url: str | None = Field(default=None, max_length=2000)
+    prefer_email_over_sms: bool | None = None
     outbound_webhook_secret: str | None = Field(default=None, max_length=128)
     slack_webhook_url: str | None = Field(default=None, max_length=2000)
     dial_number_id: str | None = None

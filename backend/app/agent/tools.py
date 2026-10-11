@@ -343,7 +343,7 @@ class CaseTools:
         text = text.strip()
         if not text:
             raise ToolError("message text is empty")
-        channel = delivery_channel(ctx.case, ctx.customer)
+        channel = delivery_channel(ctx.case, ctx.customer, ctx.business)
         if channel == Channel.SMS and len(text) > 320:
             raise ToolError("SMS messages must be under 320 characters")
         delivery_error: str | None = None
