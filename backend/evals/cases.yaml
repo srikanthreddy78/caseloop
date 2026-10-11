@@ -1,0 +1,367 @@
+# Agent evaluation set: scripted customer conversations for a lamp retailer.
+#
+# Run with `make eval` (scripted runner) or `make eval-live` (OpenAI runner); see scripts/eval.py.
+#
+# Each case gets a fresh business (policy below unless the case overrides `policy`), the
+# `orders` rows pushed through POST /v1/orders (dates are relative: `delivered_days_ago`,
+# `shipped_days_ago`, `ordered_days_ago`), then the `steps` in order. A step with `text` is a
+# customer message (email by default, `channel: sms` on the case for SMS); `advance_hours` moves
+# the clock first and runs whatever fell due (nudges, abandonment). A step with only
+# `advance_hours` is the customer staying silent. Due jobs run after every message.
+#
+# `expect`: `state` (one or a list), `provided` (requirement keys that must be `provided`),
+# `escalated` (escalation.reason must be set), `reply_contains` (0-3 case-insensitive substrings
+# of the agent's last outbound message). Expectations describe what a good agent does under the
+# policy; the scripted runner is a baseline and is not expected to pass every case.
+
+policy: |
+  Acme Lamps support policy:
+  - Damaged on arrival: we send a free replacement once we have the order number and a photo of the damage.
+  - Refunds: within 30 days of delivery, need the order number. Outside 30 days, offer store credit only.
+  - Returns: within 30 days of delivery we email a prepaid return label. Outside 30 days, store credit only.
+  - Missing shipments: if tracking shows delivered more than 3 days ago, send a free replacement once we have the order number. If tracking shows the parcel still in transit, tell the customer the latest tracking status and ask them to wait for the expected delivery date.
+  - Wrong item received: send the correct item and a prepaid return label once we have the order number.
+  - Duplicate charges: refund the duplicate charge within 5 business days once we have the order number.
+  - Product questions: every lamp takes a standard E26 bulb and works with dimmer switches; standard shipping takes 3-5 business days. Answer and close; nothing else is needed.
+  - Never promise expedited shipping. Escalate anything involving legal threats, abusive language, or amounts over $500.
+
+cases:
+  # ---- damaged on arrival ----------------------------------------------------------------
+  - name: damaged_everything_at_once
+    description: Customer gives order number and photo in the first message.
+    customer: { name: Jane, email: jane@customer-mail.co }
+    orders:
+      - { order_number: A12345, email: jane@customer-mail.co, status: delivered, delivered_days_ago: 2, total: 89.00, item: Luna desk lamp }
+    steps:
+      - text: "Hi, my Luna desk lamp arrived with a cracked base. Order #A12345, photo of the crack attached. I'd like a replacement please."
+        attachments: [{ filename: crack.jpg, content_type: image/jpeg }]
+    expect:
+      state: resolved
+      provided: [order_number, photos]
+      escalated: false
+      reply_contains: [replacement]
+
+  - name: damaged_no_order_no_photo
+    description: Nothing to go on; the agent must ask for both the order number and a photo in one message.
+    customer: { name: Omar, email: omar@customer-mail.co }
+    steps:
+      - text: "The lamp I bought from you arrived broken, the shade is dented on one side. What do I do now?"
+    expect:
+      state: awaiting_customer
+      provided: []
+      escalated: false
+      reply_contains: [order number, photo]
+
+  - name: damaged_order_no_photo
+    description: Order number given, photo still needed.
+    customer: { name: Priya, email: priya@customer-mail.co }
+    orders:
+      - { order_number: "20417", email: priya@customer-mail.co, status: delivered, delivered_days_ago: 3, total: 120.00, item: Arc floor lamp }
+    steps:
+      - text: "My floor lamp arrived cracked near the base. Order 20417."
+    expect:
+      state: awaiting_customer
+      provided: [order_number]
+      escalated: false
+      reply_contains: [photo]
+
+  - name: damaged_two_step
+    description: Agent asks, customer replies with everything at once.
+    customer: { name: Lena, email: lena@customer-mail.co }
+    orders:
+      - { order_number: "20418", email: lena@customer-mail.co, status: delivered, delivered_days_ago: 4, total: 75.00, item: Orbit table lamp }
+    steps:
+      - text: "The table lamp arrived broken, the glass shade is shattered."
+      - advance_hours: 5
+        text: "Sorry, order is 20418. Photo attached."
+        attachments: [{ filename: shade.jpg, content_type: image/jpeg }]
+    expect:
+      state: resolved
+      provided: [order_number, photos]
+      escalated: false
+      reply_contains: [replacement]
+
+  - name: damaged_sms
+    description: Same complaint over SMS; the reply must fit the channel.
+    channel: sms
+    customer: { phone: "+15550100001" }
+    steps:
+      - text: "Lamp came smashed, box crushed too."
+    expect:
+      state: awaiting_customer
+      provided: []
+      escalated: false
+      reply_contains: [order number]
+
+  - name: damaged_high_value_escalates
+    description: Everything is in hand but the amount is over the $500 policy limit.
+    customer: { name: Victor, email: victor@customer-mail.co }
+    orders:
+      - { order_number: "30011", email: victor@customer-mail.co, status: delivered, delivered_days_ago: 1, total: 650.00, item: Aurora chandelier }
+    steps:
+      - text: "My $650 Aurora chandelier arrived shattered, order 30011, photos attached. Please replace it."
+        attachments: [{ filename: chandelier1.jpg, content_type: image/jpeg }, { filename: chandelier2.jpg, content_type: image/jpeg }]
+    expect:
+      state: escalated
+      provided: []
+      escalated: true
+      reply_contains: []
+
+  - name: damaged_frustrated_not_abusive
+    description: Angry tone but no abuse or threat; still resolved normally.
+    customer: { name: Rosa, email: rosa@customer-mail.co }
+    orders:
+      - { order_number: "20419", email: rosa@customer-mail.co, status: delivered, delivered_days_ago: 2, total: 89.00, item: Luna desk lamp }
+    steps:
+      - text: "This is ridiculous, it's the second lamp from you that arrived cracked. Order 20419, photos attached. I expect a replacement."
+        attachments: [{ filename: crack2.jpg, content_type: image/jpeg }]
+    expect:
+      state: resolved
+      provided: [order_number, photos]
+      escalated: false
+      reply_contains: [replacement]
+
+  # ---- refunds and returns ---------------------------------------------------------------
+  - name: refund_inside_window
+    description: Delivered 10 days ago; refund is within policy.
+    customer: { name: Sam, email: sam@customer-mail.co }
+    orders:
+      - { order_number: "41001", email: sam@customer-mail.co, status: delivered, delivered_days_ago: 10, total: 89.00, item: Luna desk lamp }
+    steps:
+      - text: "I'd like a refund for order 41001, the light is too dim for my desk."
+    expect:
+      state: resolved
+      provided: [order_number]
+      escalated: false
+      reply_contains: [refund]
+
+  - name: refund_outside_window_store_credit
+    description: Delivered 60 days ago; policy allows store credit only.
+    customer: { name: Noah, email: noah@customer-mail.co }
+    orders:
+      - { order_number: "41002", email: noah@customer-mail.co, status: delivered, delivered_days_ago: 60, total: 89.00, item: Luna desk lamp }
+    steps:
+      - text: "Please refund order 41002, I just don't use it any more."
+    expect:
+      state: resolved
+      provided: [order_number]
+      escalated: false
+      reply_contains: [credit]
+
+  - name: refund_no_order_number
+    description: Refund request with nothing to look up.
+    customer: { name: Ava, email: ava@customer-mail.co }
+    steps:
+      - text: "I want my money back for the floor lamp I bought last month, it flickers constantly."
+    expect:
+      state: awaiting_customer
+      provided: []
+      escalated: false
+      reply_contains: [order number]
+
+  - name: refund_reply_with_order_after_ask
+    description: Agent asks for the order number, customer replies with it.
+    customer: { name: Ben, email: ben@customer-mail.co }
+    orders:
+      - { order_number: "41003", email: ben@customer-mail.co, status: delivered, delivered_days_ago: 5, total: 120.00, item: Arc floor lamp }
+    steps:
+      - text: "Can I get a refund? The lamp hums loudly whenever it's on."
+      - advance_hours: 3
+        text: "Order 41003."
+    expect:
+      state: resolved
+      provided: [order_number]
+      escalated: false
+      reply_contains: [refund]
+
+  - name: return_inside_window
+    description: Return within 30 days of delivery.
+    customer: { name: Mia, email: mia@customer-mail.co }
+    orders:
+      - { order_number: "42001", email: mia@customer-mail.co, status: delivered, delivered_days_ago: 6, total: 75.00, item: Orbit table lamp }
+    steps:
+      - text: "I'd like to return the lamp from order 42001, it doesn't match my room."
+    expect:
+      state: resolved
+      provided: [order_number]
+      escalated: false
+      reply_contains: [return]
+
+  # ---- missing shipments -----------------------------------------------------------------
+  - name: missing_tracking_says_delivered
+    description: Tracking shows delivered 6 days ago; policy says replace.
+    customer: { name: Chloe, email: chloe@customer-mail.co }
+    orders:
+      - { order_number: "43001", email: chloe@customer-mail.co, status: delivered, shipped_days_ago: 9, delivered_days_ago: 6, tracking: 1Z999AA10123456784, carrier: UPS, total: 89.00, item: Luna desk lamp }
+    steps:
+      - text: "Order 43001 never arrived even though tracking says delivered. Nothing at my door or with neighbours."
+    expect:
+      state: resolved
+      provided: [order_number]
+      escalated: false
+      reply_contains: [replacement]
+
+  - name: missing_still_in_transit
+    description: Shipped 2 days ago and in transit; the agent should relay tracking, not replace.
+    customer: { name: Dev, email: dev@customer-mail.co }
+    orders:
+      - { order_number: "43002", email: dev@customer-mail.co, status: shipped, shipped_days_ago: 2, tracking: 1Z999AA10123456790, carrier: UPS, total: 120.00, item: Arc floor lamp }
+    steps:
+      - text: "Where is order 43002? It hasn't arrived yet."
+    expect:
+      state: [resolved, awaiting_customer]
+      provided: [order_number]
+      escalated: false
+      reply_contains: [tracking]
+
+  - name: missing_no_tracking_no_order
+    description: Nothing to look up; the agent must ask.
+    customer: { name: Ella, email: ella@customer-mail.co }
+    steps:
+      - text: "My lamp still hasn't arrived and it has been three weeks now."
+    expect:
+      state: awaiting_customer
+      provided: []
+      escalated: false
+      reply_contains: [order number]
+
+  # ---- billing -----------------------------------------------------------------------------
+  - name: duplicate_charge_with_order
+    description: Double charge with the order number; policy refunds the duplicate.
+    customer: { name: Tom, email: tom@customer-mail.co }
+    orders:
+      - { order_number: "44001", email: tom@customer-mail.co, status: delivered, delivered_days_ago: 3, total: 89.00, item: Luna desk lamp }
+    steps:
+      - text: "I was charged twice for order 44001, there are two $89 lines on my card statement."
+    expect:
+      state: resolved
+      provided: [order_number]
+      escalated: false
+      reply_contains: [charge]
+
+  - name: duplicate_charge_no_order
+    description: Double charge without an order number.
+    customer: { name: Zoe, email: zoe@customer-mail.co }
+    steps:
+      - text: "You charged my card twice this month and I only bought one lamp."
+    expect:
+      state: awaiting_customer
+      provided: []
+      escalated: false
+      reply_contains: [order number]
+
+  # ---- hand-offs ---------------------------------------------------------------------------
+  - name: legal_threat
+    description: Any mention of legal action goes to a person.
+    customer: { name: Grace, email: grace@customer-mail.co }
+    orders:
+      - { order_number: "9001", email: grace@customer-mail.co, status: delivered, delivered_days_ago: 12, total: 89.00, item: Luna desk lamp }
+    steps:
+      - text: "Order 9001 arrived broken and nobody answers my emails. If I don't get a replacement this week I'm contacting my lawyer."
+    expect:
+      state: escalated
+      provided: []
+      escalated: true
+      reply_contains: []
+
+  - name: abusive_customer
+    description: Abuse without a legal threat still goes to a person.
+    customer: { name: Kyle, email: kyle@customer-mail.co }
+    orders:
+      - { order_number: "45001", email: kyle@customer-mail.co, status: delivered, delivered_days_ago: 2, total: 89.00, item: Luna desk lamp }
+    steps:
+      - text: "You people are useless idiots. Fix my damn lamp, order 45001, or I'll make sure everyone knows what garbage you sell."
+    expect:
+      state: escalated
+      provided: []
+      escalated: true
+      reply_contains: []
+
+  # ---- questions that need no action -----------------------------------------------------
+  - name: question_dimmer_compatibility
+    description: Pre-sales question answered from policy; nothing to collect.
+    customer: { name: Hana, email: hana@customer-mail.co }
+    steps:
+      - text: "Quick question before I buy: do your lamps work with dimmer switches? Looking at the Luna."
+    expect:
+      state: resolved
+      provided: []
+      escalated: false
+      reply_contains: [dimmer]
+
+  # ---- silence and follow-ups --------------------------------------------------------------
+  - name: silent_then_replies_after_two_nudges
+    description: Customer ignores two nudges, then sends everything.
+    customer: { name: Ivy, email: ivy@customer-mail.co }
+    orders:
+      - { order_number: "20420", email: ivy@customer-mail.co, status: delivered, delivered_days_ago: 1, total: 75.00, item: Orbit table lamp }
+    steps:
+      - text: "The lamp arrived with a shattered shade."
+      - advance_hours: 25
+      - advance_hours: 73
+      - advance_hours: 2
+        text: "Sorry for the silence! Order 20420, photo attached."
+        attachments: [{ filename: shade2.jpg, content_type: image/jpeg }]
+    expect:
+      state: resolved
+      provided: [order_number, photos]
+      escalated: false
+      reply_contains: [replacement]
+
+  - name: silent_through_three_nudges
+    description: Three nudges at 24h, 72h, 168h, then the case is abandoned and handed off.
+    customer: { name: Leo, email: leo@customer-mail.co }
+    steps:
+      - text: "The lamp arrived dented."
+      - advance_hours: 25
+      - advance_hours: 73
+      - advance_hours: 169
+      - advance_hours: 169
+    expect:
+      state: abandoned
+      provided: []
+      escalated: true
+      reply_contains: [order number]
+
+  # ---- reopened case -----------------------------------------------------------------------
+  - name: reopened_with_thanks
+    description: Resolved refund; the customer writes back two days later to say thanks.
+    customer: { name: Nina, email: nina@customer-mail.co }
+    orders:
+      - { order_number: "41004", email: nina@customer-mail.co, status: delivered, delivered_days_ago: 4, total: 89.00, item: Luna desk lamp }
+    steps:
+      - text: "Refund please for order 41004, the switch is loose."
+      - advance_hours: 48
+        text: "Thanks, the refund came through already!"
+    expect:
+      state: resolved
+      provided: [order_number]
+      escalated: false
+      reply_contains: [refund]
+
+  # ---- stored-order lookups ----------------------------------------------------------------
+  - name: wrong_item_received
+    description: Policy says send the correct item plus a return label.
+    customer: { name: Paul, email: paul@customer-mail.co }
+    orders:
+      - { order_number: "46001", email: paul@customer-mail.co, status: delivered, delivered_days_ago: 2, total: 89.00, item: Luna desk lamp }
+    steps:
+      - text: "I ordered the Luna desk lamp but received a floor lamp instead. Order 46001."
+    expect:
+      state: resolved
+      provided: [order_number]
+      escalated: false
+      reply_contains: [correct]
+
+  - name: refund_found_by_email_without_order_number
+    description: No order number, but the stored order matches the customer's email.
+    customer: { name: Ruth, email: ruth@customer-mail.co }
+    orders:
+      - { order_number: "41005", email: ruth@customer-mail.co, status: delivered, delivered_days_ago: 8, total: 120.00, item: Arc floor lamp }
+    steps:
+      - text: "I'd like a refund for the floor lamp I bought a couple of weeks ago. I can't find the order number but it was under this email."
+    expect:
+      state: resolved
+      provided: [order_number]
+      escalated: false
+      reply_contains: ["41005"]

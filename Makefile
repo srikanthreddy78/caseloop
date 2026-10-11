@@ -1,4 +1,4 @@
-.PHONY: install test lint format typecheck dev demo demo-live migrate db-create create-business
+.PHONY: install test lint format typecheck dev demo demo-live eval eval-live migrate db-create create-business
 
 install:
 	cd backend && uv sync --extra dev
@@ -38,3 +38,11 @@ demo:
 # Real OpenAI model drives the tools; channels still fake (nothing is sent).
 demo-live:
 	cd backend && uv run python scripts/demo.py --live
+
+# Agent evaluation set (backend/evals/cases.yaml): scripted runner is the baseline.
+eval:
+	cd backend && uv run python scripts/eval.py
+
+# Same cases, real OpenAI model; costs money, expects at least 80% to pass.
+eval-live:
+	cd backend && uv run python scripts/eval.py --live --min-pass 0.8

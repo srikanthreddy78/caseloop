@@ -33,6 +33,8 @@ inbound message ──► case (new) ──► agent turn ──► ask for what
 - Every state change, message, and tool call is an event on the case timeline.
 - Insights: a 30-day report (themes, root causes, suggested fixes, escalation reasons) is
   regenerated daily per business and on demand.
+- Hand-offs go to the business's escalation email and, if configured, a Slack webhook; a daily
+  digest email lists open cases by state, who has been waiting longest, and what needs a person.
 - One FastAPI process: HTTP API, webhook receivers, and a Postgres-backed job queue
   (agent turns, follow-ups, transcripts, insights, outbound webhooks). No Redis.
 
@@ -113,7 +115,7 @@ dashboard's `caseloop_session` cookie (people) and return `{"data": …}`; error
 | POST | `/v1/auth/magic-link`, `/v1/auth/magic-link/exchange`, `/v1/auth/logout` | Email a sign-in link, turn it into a session cookie, sign out |
 | GET | `/v1/auth/me` | Signed-in member and their business |
 | GET / POST / DELETE | `/v1/team`, `/v1/team/{id}` | List, add (owners), remove (owners) team members |
-| GET / PATCH | `/v1/businesses/me` | Policy text, follow-up schedule, hand-off email, webhook URL |
+| GET / PATCH | `/v1/businesses/me` | Policy text, follow-up schedule, hand-off email, webhook URL, Slack alert URL |
 | GET | `/v1/cases?state=open,gathering&limit=&offset=` | List cases |
 | POST | `/v1/cases` | Open a case from any source |
 | GET | `/v1/cases/{id}` and `/timeline` | Case file and full history |
@@ -150,6 +152,8 @@ pytest against a Postgres service, the dashboard build, and a Docker image build
 make test        # pytest against caseloop_test
 make lint        # ruff
 make typecheck   # mypy
+make eval        # 25 scripted customer conversations (backend/evals/cases.yaml), scripted agent
+make eval-live   # same cases driven by the real model; costs money, expects 80% to pass
 ```
 
 Layout: `backend/app` (FastAPI app: `cases/` state machine and service, `agent/` prompts,
