@@ -6,10 +6,17 @@ import logging
 import uuid
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import BusinessDep, MemberDep, ServicesDep, SessionDep
+from app.api.deps import (
+    BusinessDep,
+    MemberDep,
+    RateLimitApi,
+    ServicesDep,
+    SessionDep,
+    check_magic_link_limits,
+)
 from app.auth import (
     LOGIN_TOKEN_TTL,
     SESSION_COOKIE,
@@ -33,7 +40,7 @@ from app.schemas import (
 
 log = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/v1", tags=["auth"])
+router = APIRouter(prefix="/v1", tags=["auth"], dependencies=[RateLimitApi])
 
 
 def _issue_login_token(session: AsyncSession, services: Services, member: TeamMember) -> str:
@@ -105,10 +112,11 @@ def _session_out(member: TeamMember, business: Business) -> SessionOut:
     status_code=status.HTTP_202_ACCEPTED,
 )
 async def request_magic_link(
-    payload: MagicLinkIn, session: SessionDep, services: ServicesDep
+    payload: MagicLinkIn, request: Request, session: SessionDep, services: ServicesDep
 ) -> DataOut[MagicLinkOut]:
     """Email a sign-in link if the address belongs to a team. Always 202: never reveals membership."""
     email = str(payload.email).lower()
+    check_magic_link_limits(request, email)
     members = (
         (
             await session.execute(
@@ -137,21 +145,31 @@ async def request_magic_link(
 async def exchange_magic_link(
     payload: MagicLinkExchangeIn, response: Response, session: SessionDep, services: ServicesDep
 ) -> DataOut[SessionOut]:
-    """Turn a single-use link token into a 30-day session cookie."""
+    """Turn a single-use link token into a 30-day session cookie.
+
+    Marking the token used is one conditional UPDATE, so two exchanges racing on the same link
+    cannot both get a session: the second finds ``used_at`` already set and matches no row.
+    """
     now = services.clock.now()
-    login = (
+    claimed = (
         await session.execute(
-            select(LoginToken).where(LoginToken.token_hash == hash_token(payload.token))
+            update(LoginToken)
+            .where(
+                LoginToken.token_hash == hash_token(payload.token),
+                LoginToken.used_at.is_(None),
+                LoginToken.expires_at > now,
+            )
+            .values(used_at=now)
+            .returning(LoginToken.team_member_id)
         )
     ).scalar_one_or_none()
-    if login is None or login.used_at is not None or login.expires_at <= now:
+    if claimed is None:
         raise HTTPException(
             status.HTTP_401_UNAUTHORIZED, "this sign-in link is invalid or has expired"
         )
-    member = await session.get(TeamMember, login.team_member_id)
+    member = await session.get(TeamMember, claimed)
     if member is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "this sign-in link is no longer valid")
-    login.used_at = now
     session_token = generate_session_token()
     session.add(
         DashboardSession(
@@ -208,7 +226,7 @@ async def invite_member(
     """Owners add people by email; the invitee gets a sign-in link straight away."""
     if member.role != MemberRole.OWNER:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "only owners can add team members")
-    email = str(payload.email).lower()
+    email = str(payload.email).strip().lower()  # stored lowercase; sign-in looks up lowercase
     business = member.business
     existing = await session.execute(
         select(TeamMember.id).where(

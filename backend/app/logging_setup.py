@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sys
 from datetime import UTC, datetime
 from typing import Any
@@ -26,6 +27,36 @@ _STANDARD_ATTRS = frozenset(
 )
 
 _UVICORN_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access")
+
+REDACTED = "…"
+# Chat session tokens travel in the path; magic-link and other tokens travel as ?token=.
+_PATH_TOKEN = re.compile(r"(/v1/chat/sessions/)[^/?\s\"]+")
+_QUERY_TOKEN = re.compile(r"((?:[?&]|^)token=)[^&\s\"]*")
+
+
+def redact_tokens(text: str) -> str:
+    """Replace secrets that appear in request lines with a placeholder."""
+    text = _PATH_TOKEN.sub(rf"\g<1>{REDACTED}", text)
+    return _QUERY_TOKEN.sub(rf"\g<1>{REDACTED}", text)
+
+
+class AccessLogRedactor(logging.Filter):
+    """Scrub tokens from uvicorn's access lines before any handler formats them.
+
+    uvicorn logs ``'%s - "%s %s HTTP/%s" %d'`` with the request line in ``args``, so both the
+    template and every string argument are scrubbed. The record is always kept.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.msg, str):
+            record.msg = redact_tokens(record.msg)
+        if isinstance(record.args, tuple):
+            record.args = tuple(redact_tokens(a) if isinstance(a, str) else a for a in record.args)
+        elif isinstance(record.args, dict):
+            record.args = {
+                k: redact_tokens(v) if isinstance(v, str) else v for k, v in record.args.items()
+            }
+        return True
 
 
 class JsonFormatter(logging.Formatter):
@@ -77,5 +108,8 @@ def configure_logging(settings: Settings) -> None:
         uv_logger = logging.getLogger(name)
         uv_logger.handlers.clear()
         uv_logger.propagate = True
+    access = logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, AccessLogRedactor) for f in access.filters):
+        access.addFilter(AccessLogRedactor())
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)

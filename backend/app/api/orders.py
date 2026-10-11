@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
-from app.api.deps import BusinessDep, ServicesDep, SessionDep
+from app.api.deps import BusinessDep, RateLimitApi, ServicesDep, SessionDep
 from app.models import Order
 from app.orders.base import OrderQuery, OrderRecord, source_label
 from app.orders.imports import parse_csv, rows_to_records
@@ -16,7 +16,7 @@ from app.orders.service import LIVE_TYPES, STORED_TYPES
 from app.orders.store import row_to_record, source_counts, upsert_orders
 from app.schemas import DataOut
 
-router = APIRouter(prefix="/v1/orders", tags=["orders"])
+router = APIRouter(prefix="/v1/orders", tags=["orders"], dependencies=[RateLimitApi])
 
 
 class OrderOut(BaseModel):

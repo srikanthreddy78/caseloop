@@ -399,7 +399,9 @@
       } catch { /* ignore a bad frame */ }
     });
     es.addEventListener("error", () => {
-      // EventSource reconnects on its own; only a closed stream (404, no SSE support) needs the fallback.
+      // The server ends every stream after ten minutes; EventSource reconnects on its own after the
+      // `retry:` delay it sent, and seenIds drops anything re-sent. Only a stream the browser gave up
+      // on (404, 429, no SSE support) falls back to polling.
       if (es.readyState === EventSource.CLOSED && stream === es) { stream = null; startPolling(); }
     });
   }

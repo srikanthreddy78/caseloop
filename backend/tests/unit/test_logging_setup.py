@@ -4,7 +4,87 @@ import json
 import logging
 
 from app.config import Settings
-from app.logging_setup import JsonFormatter, TextFormatter, configure_logging
+from app.logging_setup import (
+    AccessLogRedactor,
+    JsonFormatter,
+    TextFormatter,
+    configure_logging,
+    redact_tokens,
+)
+
+
+def _access_record(method: str, path: str, status: int = 200) -> logging.LogRecord:
+    """A record shaped like uvicorn's: the request line arrives through ``args``."""
+    return logging.LogRecord(
+        "uvicorn.access",
+        logging.INFO,
+        "h11_impl.py",
+        1,
+        '%s - "%s %s HTTP/%s" %d',
+        ("10.0.0.7:5050", method, path, "1.1", status),
+        None,
+    )
+
+
+def test_redact_tokens_hides_chat_session_tokens_and_token_query_values() -> None:
+    assert (
+        redact_tokens("/v1/chat/sessions/abcDEF123-_/messages?after=2026-01-01")
+        == "/v1/chat/sessions/…/messages?after=2026-01-01"
+    )
+    assert redact_tokens("/v1/chat/sessions/abc") == "/v1/chat/sessions/…"
+    assert redact_tokens("/v1/chat/sessions/abc?after=x") == "/v1/chat/sessions/…?after=x"
+    assert redact_tokens("/dashboard/login?token=s3cret") == "/dashboard/login?token=…"
+    assert redact_tokens("/x?a=1&token=s3cret&b=2") == "/x?a=1&token=…&b=2"
+    assert redact_tokens("token=s3cret") == "token=…"
+    # Untouched when nothing sensitive is there.
+    assert redact_tokens("/v1/chat/sessions") == "/v1/chat/sessions"
+    assert redact_tokens("/v1/cases?state=open") == "/v1/cases?state=open"
+
+
+def test_access_log_filter_scrubs_the_request_line_and_keeps_the_record() -> None:
+    redactor = AccessLogRedactor()
+    record = _access_record("GET", "/v1/chat/sessions/tok123/stream?after=2026-01-01T00:00:00")
+    assert redactor.filter(record) is True
+    assert record.getMessage() == (
+        '10.0.0.7:5050 - "GET /v1/chat/sessions/…/stream?after=2026-01-01T00:00:00 HTTP/1.1" 200'
+    )
+    login = _access_record("GET", "/dashboard/login?token=abc.def")
+    redactor.filter(login)
+    assert "abc.def" not in login.getMessage()
+    assert "/dashboard/login?token=…" in login.getMessage()
+    # Both formatters see the scrubbed record.
+    assert "tok123" not in JsonFormatter().format(record)
+    assert "tok123" not in TextFormatter().format(record)
+    plain = _access_record("GET", "/healthz")
+    redactor.filter(plain)
+    assert plain.getMessage() == '10.0.0.7:5050 - "GET /healthz HTTP/1.1" 200'
+
+
+def test_configure_logging_installs_the_access_redactor_once() -> None:
+    configure_logging(Settings(env="prod"))
+    configure_logging(Settings(env="test"))
+    access = logging.getLogger("uvicorn.access")
+    assert len([f for f in access.filters if isinstance(f, AccessLogRedactor)]) == 1
+    captured: list[str] = []
+
+    class Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            captured.append(record.getMessage())
+
+    handler = Capture()
+    logging.getLogger().addHandler(handler)
+    try:
+        access.info(
+            '%s - "%s %s HTTP/%s" %d',
+            "1.2.3.4:1",
+            "POST",
+            "/v1/chat/sessions/tok456/attachments",
+            "1.1",
+            201,
+        )
+    finally:
+        logging.getLogger().removeHandler(handler)
+    assert captured == ['1.2.3.4:1 - "POST /v1/chat/sessions/…/attachments HTTP/1.1" 201']
 
 
 def _record(**extra: object) -> logging.LogRecord:

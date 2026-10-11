@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy import func, select
 
 from app.api.deps import BusinessDep, RateLimitApi, ServicesDep, SessionDep
-from app.attachments import case_attachments, resolve_stored
+from app.attachments import ATTACHMENT_HEADERS, case_attachments, resolve_stored
 from app.cases import state as sm
 from app.cases.service import (
     cancel_pending_jobs,
@@ -184,7 +184,7 @@ async def get_case_attachment(
         media_type=str(att.get("content_type") or "application/octet-stream"),
         filename=str(att.get("filename") or path.name),
         content_disposition_type="inline",
-        headers={"Cache-Control": "private, max-age=3600"},
+        headers=ATTACHMENT_HEADERS,
     )
 
 

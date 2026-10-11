@@ -13,6 +13,9 @@ from app.models import Message
 
 MAX_FILES = 5
 MAX_BYTES = 8 * 1024 * 1024
+# Per case, across every message: a chat is a conversation, not a backup drive.
+MAX_CASE_FILES = 25
+MAX_CASE_BYTES = 50 * 1024 * 1024
 ALLOWED_TYPES: dict[str, str] = {
     "image/jpeg": ".jpg",
     "image/png": ".png",
@@ -22,7 +25,35 @@ ALLOWED_TYPES: dict[str, str] = {
     "image/heif": ".heif",
     "application/pdf": ".pdf",
 }
+# Leading bytes each declared type must start with. HEIC/HEIF carry a brand inside an ISO
+# container that many encoders vary, so they are checked by extension and declared type only.
+_MAGIC: dict[str, tuple[bytes, ...]] = {
+    "image/jpeg": (b"\xff\xd8\xff",),
+    "image/png": (b"\x89PNG\r\n\x1a\n",),
+    "image/gif": (b"GIF87a", b"GIF89a"),
+    "image/webp": (b"RIFF",),
+    "application/pdf": (b"%PDF-",),
+}
+_HEIF_EXTENSIONS = (".heic", ".heif")
 _CHUNK = 1024 * 1024
+# Downloads are served as-is but never run: no MIME sniffing, no scripts, no top-level navigation.
+ATTACHMENT_HEADERS = {
+    "Cache-Control": "private, max-age=3600",
+    "X-Content-Type-Options": "nosniff",
+    "Content-Security-Policy": "sandbox",
+}
+
+
+def matches_declared_type(content_type: str, head: bytes, filename: str) -> bool:
+    """True when the first bytes (or, for HEIF, the extension) agree with the declared type."""
+    if content_type in ("image/heic", "image/heif"):
+        return filename.lower().endswith(_HEIF_EXTENSIONS)
+    signatures = _MAGIC.get(content_type)
+    if signatures is None:
+        return False
+    if content_type == "image/webp":
+        return head[:4] == b"RIFF" and head[8:12] == b"WEBP"
+    return any(head.startswith(sig) for sig in signatures)
 
 
 def safe_filename(name: str | None, content_type: str) -> str:
@@ -32,8 +63,13 @@ def safe_filename(name: str | None, content_type: str) -> str:
     return base[:120]
 
 
-async def store_uploads(files: list[UploadFile], folder: Path, data_dir: Path) -> list[dict]:
-    """Validate and write each upload; return the metadata the message row stores."""
+async def store_uploads(
+    files: list[UploadFile], folder: Path, data_dir: Path, *, byte_budget: int | None = None
+) -> list[dict]:
+    """Validate and write each upload; return the metadata the message row stores.
+
+    ``byte_budget`` is how much the case may still take in total; crossing it is a 413.
+    """
     if not files:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "no files were sent")
     if len(files) > MAX_FILES:
@@ -55,22 +91,40 @@ async def store_uploads(files: list[UploadFile], folder: Path, data_dir: Path) -
     folder.mkdir(parents=True, exist_ok=True)
     stored: list[dict] = []
     written: list[Path] = []
+    total = 0
     try:
         for f in files:
             ctype = (f.content_type or "").split(";", 1)[0].strip().lower()
             filename = safe_filename(f.filename, ctype)
             path = folder / f"{uuid.uuid4().hex[:8]}_{filename}"
             size = 0
+            first = True
             with path.open("wb") as out:
                 written.append(path)
                 while chunk := await f.read(_CHUNK):
+                    if first:
+                        first = False
+                        if not matches_declared_type(ctype, chunk[:16], f.filename or ""):
+                            raise HTTPException(
+                                status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+                                f"{filename} does not look like a {ctype} file",
+                            )
                     size += len(chunk)
+                    total += len(chunk)
                     if size > MAX_BYTES:
                         raise HTTPException(
                             status.HTTP_413_CONTENT_TOO_LARGE,
                             f"{filename} is over {MAX_BYTES // (1024 * 1024)} MB",
                         )
+                    if byte_budget is not None and total > byte_budget:
+                        raise HTTPException(
+                            status.HTTP_413_CONTENT_TOO_LARGE,
+                            f"this chat has reached its {MAX_CASE_BYTES // (1024 * 1024)} MB "
+                            "attachment limit",
+                        )
                     out.write(chunk)
+            if first:  # nothing was read: an empty file cannot be the type it claims
+                raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, f"{filename} is empty")
             stored.append(
                 {
                     "filename": filename,

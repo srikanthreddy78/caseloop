@@ -102,15 +102,16 @@ MemberDep = Annotated[TeamMember, Depends(require_member)]
 
 
 class RateLimiter:
-    """In-memory token bucket per key: ``per_minute`` requests of burst, refilled continuously.
+    """In-memory token bucket per key: ``limit`` requests of burst, refilled over ``window_seconds``.
 
     One instance per process, nothing shared across replicas: this guards against runaway
     widgets and scripts, it is not a billing meter.
     """
 
-    def __init__(self, per_minute: int = 60) -> None:
-        self.capacity = float(per_minute)
-        self.refill_per_second = per_minute / 60
+    def __init__(self, limit: int = 60, window_seconds: float = 60.0) -> None:
+        self.capacity = float(limit)
+        self.window_seconds = float(window_seconds)
+        self.refill_per_second = limit / window_seconds
         self._buckets: dict[str, tuple[float, float]] = {}  # key -> (tokens, last seen)
 
     def allow(self, key: str, now: float | None = None) -> bool:
@@ -125,26 +126,82 @@ class RateLimiter:
         self._buckets[key] = (tokens - 1, now)
         return True
 
+    def reset(self) -> None:
+        self._buckets.clear()
+
     def _prune(self, now: float) -> None:
-        stale = now - 60
+        # A bucket idle for a whole window is full again, so dropping it changes nothing.
+        stale = now - self.window_seconds
         for key, (_, last) in list(self._buckets.items()):
             if last < stale:
                 del self._buckets[key]
 
 
-limiter = RateLimiter(per_minute=60)
+class StreamSlots:
+    """Counts open server-sent-event streams per key so one client cannot hold every worker.
+
+    ``acquire`` returns False when any key is at its cap; every successful acquire must be paired
+    with exactly one ``release`` (the stream's ``finally``).
+    """
+
+    def __init__(self, caps: dict[str, int]) -> None:
+        self.caps = caps
+        self._open: dict[tuple[str, str], int] = {}
+
+    def acquire(self, keys: dict[str, str]) -> bool:
+        for kind, key in keys.items():
+            if self._open.get((kind, key), 0) >= self.caps[kind]:
+                return False
+        for kind, key in keys.items():
+            self._open[(kind, key)] = self._open.get((kind, key), 0) + 1
+        return True
+
+    def release(self, keys: dict[str, str]) -> None:
+        for kind, key in keys.items():
+            left = self._open.get((kind, key), 0) - 1
+            if left <= 0:
+                self._open.pop((kind, key), None)
+            else:
+                self._open[(kind, key)] = left
+
+    def count(self, kind: str, key: str) -> int:
+        return self._open.get((kind, key), 0)
+
+    def reset(self) -> None:
+        self._open.clear()
 
 
-def _rate_limited() -> HTTPException:
+# Per API key / dashboard session / client IP for the business API, and per client IP for the
+# widget. A widget key is shared by every visitor of one site, so it gets a wider bucket of its own.
+limiter = RateLimiter(limit=60)
+widget_key_limiter = RateLimiter(limit=600)
+# Sign-in links trigger an email each; keep the per-address rate low to stop inbox flooding.
+magic_link_ip_limiter = RateLimiter(limit=10)
+magic_link_email_limiter = RateLimiter(limit=3, window_seconds=600)
+stream_slots = StreamSlots(caps={"token": 3, "ip": 20})
+
+
+def reset_rate_limits() -> None:
+    """Forget every bucket and open-stream count (tests)."""
+    for lim in (limiter, widget_key_limiter, magic_link_ip_limiter, magic_link_email_limiter):
+        lim.reset()
+    stream_slots.reset()
+
+
+def _rate_limited(retry_after: int = 1) -> HTTPException:
     return HTTPException(
         status.HTTP_429_TOO_MANY_REQUESTS,
         "rate limit exceeded, try again shortly",
-        headers={"Retry-After": "1"},
+        headers={"Retry-After": str(retry_after)},
     )
 
 
+def client_ip(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
 def _client_key(request: Request) -> str:
-    return f"ip:{request.client.host if request.client else 'unknown'}"
+    return f"ip:{client_ip(request)}"
 
 
 async def rate_limit_api(
@@ -169,10 +226,26 @@ async def rate_limit_widget(
     request: Request,
     x_widget_key: Annotated[str | None, Header()] = None,
 ) -> None:
-    """Per-widget-key bucket for chat session creation; falls back to the client IP."""
-    key = f"widget:{x_widget_key}" if x_widget_key else _client_key(request)
-    if not limiter.allow(key):
+    """Two buckets for every widget call: the client IP (60/min) and, when sent, the widget key.
+
+    Browsers cannot attach the key to EventSource or ``<img>`` requests, so those only count
+    against the IP. Both buckets are debited even when one rejects, so a flood cannot probe
+    the other for free.
+    """
+    ip_ok = limiter.allow(f"widget-ip:{client_ip(request)}")
+    key_ok = widget_key_limiter.allow(f"widget:{x_widget_key}") if x_widget_key else True
+    if not (ip_ok and key_ok):
         raise _rate_limited()
+
+
+def check_magic_link_limits(request: Request, email: str) -> None:
+    """10 link requests a minute per IP and 3 per address every 10 minutes."""
+    ip_ok = magic_link_ip_limiter.allow(f"magic-ip:{client_ip(request)}")
+    email_ok = magic_link_email_limiter.allow(f"magic-email:{email}")
+    if not ip_ok:
+        raise _rate_limited()
+    if not email_ok:
+        raise _rate_limited(retry_after=60)
 
 
 RateLimitApi = Depends(rate_limit_api)
