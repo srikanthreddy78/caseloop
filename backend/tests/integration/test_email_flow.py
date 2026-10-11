@@ -309,3 +309,13 @@ async def test_human_reply_that_fails_is_saved_and_resendable(
     assert email_adapter(channels).sent[-1].text == "On it."
     bogus = f"/v1/cases/{case['id']}/messages/{case['messages'][0]['id']}/resend"
     assert (await auth_client.post(bogus)).status_code == 404  # inbound message
+
+
+async def test_facts_given_up_front_become_provided_requirements(auth_client: AsyncClient) -> None:
+    case = await simulate(
+        auth_client, "Refund please for order 31337, delivered last week and it flickers."
+    )
+    await run_jobs(auth_client)
+    case = await get_case(auth_client, case["id"])
+    req = next(r for r in case["requirements"] if r["key"] == "order_number")
+    assert req["status"] == "provided" and req["value"] == "31337"

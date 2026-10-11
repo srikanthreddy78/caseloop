@@ -106,9 +106,21 @@ async def apply_assessment(session: AsyncSession, case: Case, assessment: CaseAs
         (m for m in reversed(case.messages) if m.direction == Direction.INBOUND), None
     )
     for item in assessment.extracted:
-        found = by_key.get(canonical_key(item.key))
-        if found is None or not item.value.strip():
+        key = canonical_key(item.key)
+        if not item.value.strip() or not key:
             continue
+        found = by_key.get(key)
+        if found is None:
+            # A fact the customer already gave is still a requirement, just a satisfied one.
+            found = Requirement(
+                case_id=case.id,
+                key=key,
+                label=CANONICAL_LABELS.get(key, key.replace("_", " ").capitalize()),
+                why_needed="Provided by the customer",
+            )
+            session.add(found)
+            case.requirements.append(found)
+            by_key[key] = found
         found.status = RequirementStatus.PROVIDED
         found.value = item.value.strip()
         if last_inbound is not None:
