@@ -52,11 +52,13 @@ def create_app(services: Services | None = None, settings: Settings | None = Non
                 await svc.engine.dispose()
 
     app = FastAPI(title="Caseloop", version="0.1.0", lifespan=lifespan)
+    # The widget runs on any third-party site, so CORS stays open and credential-free. The
+    # dashboard is served from this same origin (or proxied by Vite in dev), so its session cookie
+    # never crosses origins and needs no CORS credentials.
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[settings.base_url, "http://localhost:5173"],
-        allow_credentials=True,
-        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+        allow_origins=["*"],
+        allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
         allow_headers=["*"],
     )
 
