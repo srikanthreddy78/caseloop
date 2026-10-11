@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -423,6 +424,17 @@ async def _satisfy_order_number(ctx: TurnContext, found: list[dict[str, Any]]) -
     )
 
 
+_EMAIL_IN_TEXT = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+
+
+def _spoken_email(text: str) -> str | None:
+    """Last email address in a transcript, including 'name at gmail dot com' phrasing."""
+    spoken = re.sub(r"\s+at\s+", "@", text, flags=re.I)
+    spoken = re.sub(r"\s+dot\s+", ".", spoken, flags=re.I)
+    found = _EMAIL_IN_TEXT.findall(spoken)
+    return found[-1].lower() if found else None
+
+
 async def _adopt_contact_from_requirements(ctx: TurnContext) -> None:
     """If the conversation surfaced the customer's email or phone, attach it (merging duplicates)."""
     values = {
@@ -430,6 +442,14 @@ async def _adopt_contact_from_requirements(ctx: TurnContext) -> None:
         for r in ctx.case.requirements
         if r.key in ("email", "phone") and r.value
     }
+    if "email" not in values and not ctx.customer.email:
+        last_inbound = next(
+            (m for m in reversed(ctx.case.messages) if m.direction == Direction.INBOUND), None
+        )
+        if last_inbound is not None and last_inbound.channel in ("voice", "sms", "webchat"):
+            spoken = _spoken_email(last_inbound.body_text)
+            if spoken:
+                values["email"] = spoken
     if not values:
         return
     from app.cases.service import adopt_contact
