@@ -123,6 +123,18 @@ errors are `{"error": {"code", "message"}}`.
 Outbound webhooks (`case.created`, `case.state_changed`) are signed with
 `X-Caseloop-Signature: t=<unix>,v1=<hmac-sha256 of "t.body">` using the business's secret.
 
+## Deploy
+
+The image is built from `backend/Dockerfile` with the repo root as context (it bundles the widget and
+the built dashboard) and runs `alembic upgrade head` before starting uvicorn on `$PORT`.
+
+- **Docker Compose:** `docker compose up --build` starts Postgres and the app on port 8000.
+- **Fly.io:** `fly launch --copy-config` uses `fly.toml` (one always-on machine, since the scheduler runs in-process; `/data` volume for attachments).
+- **Railway:** `railway.json` uses the Dockerfile, runs migrations before each deploy, and health-checks `/healthz`.
+
+Set the secrets from `.env.example` on the host. CI (`.github/workflows/ci.yml`) runs ruff, mypy,
+pytest against a Postgres service, the dashboard build, and a Docker image build on every push and PR.
+
 ## Develop
 
 ```bash
