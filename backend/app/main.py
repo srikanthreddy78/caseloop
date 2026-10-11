@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.api import auth, chat, dev, jobs, orders, public, webhooks_dial, webhooks_resend
+from app.channels.dial_events import DialEventListener
 from app.config import Settings, get_settings
 from app.container import Services, build_services
 from app.jobs import ensure_daily_insights_jobs
@@ -88,6 +89,11 @@ def create_app(services: Services | None = None, settings: Settings | None = Non
         svc = services or build_services(settings)
         app.state.services = svc
         task: asyncio.Task[None] | None = None
+        listener: DialEventListener | None = None
+        listener_task: asyncio.Task[None] | None = None
+        if settings.dial_api_key and settings.env != "test" and getattr(svc.channels, "dial", None):
+            listener = DialEventListener(svc)
+            listener_task = asyncio.create_task(listener.run_forever())
         if settings.scheduler_enabled and settings.env != "test":
             try:
                 await ensure_daily_insights_jobs(svc.session_factory, svc.clock.now())
@@ -97,6 +103,13 @@ def create_app(services: Services | None = None, settings: Settings | None = Non
         try:
             yield
         finally:
+            if listener is not None and listener_task is not None:
+                listener.stop()
+                listener_task.cancel()
+                try:
+                    await listener_task
+                except (asyncio.CancelledError, Exception):
+                    log.debug("dial listener stopped")
             if task is not None:
                 svc.scheduler.stop()
                 task.cancel()
