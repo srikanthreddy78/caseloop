@@ -111,5 +111,6 @@ def configure_logging(settings: Settings) -> None:
     access = logging.getLogger("uvicorn.access")
     if not any(isinstance(f, AccessLogRedactor) for f in access.filters):
         access.addFilter(AccessLogRedactor())
-    logging.getLogger("httpx").setLevel(logging.WARNING)
+    for noisy in ("httpx", "httpcore", "pubnub", "asyncio", "openai", "hpack"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
     logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)

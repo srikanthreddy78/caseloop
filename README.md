@@ -102,10 +102,14 @@ make demo-live   # real OpenAI model drives the tools; nothing is actually sent
 `email.received` pointing at `https://<host>/webhooks/resend`, and put its signing secret in
 `RESEND_WEBHOOK_SECRET`. Point the business's `inbound_email` at an address on that domain.
 
-**SMS and calls (Dial):** set `DIAL_API_KEY`, give the business its `dial_number_id` and
-`dial_phone_number`, create a webhook subscription for `message.received`, `call.ended`,
-`call.transcribed` at `https://<host>/webhooks/dial`, and store the secret in
-`DIAL_WEBHOOK_SECRET`.
+**SMS and calls (Dial):** set `DIAL_API_KEY` and give the business its `dial_number_id` and
+`dial_phone_number` (Setup, or `PATCH /v1/businesses/me`). With the key set, the app subscribes to
+Dial's account event stream at startup, so inbound texts reach Caseloop with no public URL. For
+multi-instance deployments or call events, also create a webhook subscription for
+`message.received`, `call.ended`, `call.transcribed` at `https://<host>/webhooks/dial` and store
+the secret in `DIAL_WEBHOOK_SECRET`; duplicates between the stream and the webhook are ignored.
+Set the number's inbound instruction (`dial.set_number_properties`) so inbound calls are answered
+by Dial's voice agent with the business's script.
 
 For local testing expose port 8000 with a tunnel such as ngrok.
 
