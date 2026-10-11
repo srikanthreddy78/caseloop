@@ -22,6 +22,14 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   return body as T;
 }
 
+/** Fetch a file with the API key and return an object URL (img tags cannot send the Authorization header). */
+export async function apiObjectUrl(path: string): Promise<string> {
+  const key = getApiKey();
+  const res = await fetch(path, { headers: key ? { Authorization: `Bearer ${key}` } : {} });
+  if (!res.ok) throw new ApiError(res.status, `Request failed (${res.status})`);
+  return URL.createObjectURL(await res.blob());
+}
+
 export const fmtTime = (iso: string | null | undefined) => {
   if (!iso) return "";
   const d = new Date(iso);

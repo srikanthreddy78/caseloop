@@ -4,6 +4,7 @@ import { api, fmtTime } from "../api";
 import { StatePill } from "../components/StatePill";
 import type { CaseDetail as CaseDetailT, LookupSummary, TimelineItem } from "../types";
 import { OrderCard } from "../components/OrderCard";
+import { Attachments } from "../components/Attachments";
 
 const EVENT_COPY: Record<string, (d: Record<string, unknown>) => string> = {
   case_created: (d) => `Case opened over ${d.channel}`,
@@ -71,6 +72,7 @@ export function CaseDetail() {
                     <span>{fmtTime(t.at)}</span>
                   </div>
                   <div className="whitespace-pre-wrap text-[15px]">{t.text}</div>
+                  {t.attachments && t.attachments.length > 0 && <Attachments caseId={c.id} items={t.attachments} />}
                 </li>
               ) : (
                 <li key={i} className="text-sm text-ink-soft px-1 flex justify-between">

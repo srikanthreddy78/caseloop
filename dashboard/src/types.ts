@@ -11,7 +11,8 @@ export interface Case {
   closed_at: string | null; created_at: string; updated_at: string; customer: Customer; requirements: Requirement[];
 }
 export interface CaseDetail extends Case { messages: Message[] }
-export interface TimelineItem { kind: "event" | "message"; at: string; type?: string; actor?: string; data?: Record<string, unknown>; direction?: string; channel?: string; sender?: string; text?: string; meta?: Record<string, unknown> | null }
+export interface Attachment { index: number; filename: string; content_type: string | null; size: number | null }
+export interface TimelineItem { kind: "event" | "message"; id?: string | null; at: string; type?: string; actor?: string; data?: Record<string, unknown>; direction?: string; channel?: string; sender?: string; text?: string; attachments?: Attachment[] | null; meta?: Record<string, unknown> | null }
 export interface Business {
   id: string; name: string; slug: string; inbound_email: string; from_email: string; escalation_email: string; widget_public_key: string;
   api_key_prefix: string; dial_phone_number: string | null; context_text: string; followup_schedule_hours: number[]; max_followups: number; outbound_webhook_url: string | null;

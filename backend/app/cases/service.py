@@ -10,6 +10,7 @@ from typing import Any
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.attachments import public_view
 from app.cases import state as sm
 from app.models import (
     TERMINAL_STATES,
@@ -400,16 +401,22 @@ async def case_timeline(session: AsyncSession, case_id: uuid.UUID) -> list[dict[
                 "data": e.data,
             }
         )
-    for m in messages:
+    index = 0  # attachments are addressed case-wide: GET /v1/cases/{id}/attachments/{index}
+    for m in sorted(messages, key=lambda m: (m.created_at, m.id)):
+        attachments = []
+        for att in m.attachments or []:
+            attachments.append(public_view(att, index))
+            index += 1
         items.append(
             {
                 "kind": "message",
+                "id": str(m.id),
                 "at": m.created_at.isoformat(),
                 "direction": m.direction,
                 "channel": m.channel,
                 "sender": m.sender,
                 "text": m.body_text,
-                "attachments": m.attachments,
+                "attachments": attachments,
                 "meta": m.meta,
             }
         )

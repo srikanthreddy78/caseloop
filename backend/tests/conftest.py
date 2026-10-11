@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -38,6 +40,7 @@ def settings() -> Settings:
         agent_runner="scripted",
         scheduler_enabled=False,
         base_url="http://test",
+        data_dir=Path(tempfile.mkdtemp(prefix="caseloop-test-")),
     )
 
 

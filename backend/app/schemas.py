@@ -95,6 +95,7 @@ class ListOut[T](BaseModel):
 
 class TimelineItem(BaseModel):
     kind: Literal["event", "message"]
+    id: str | None = None
     at: str
     type: str | None = None
     actor: str | None = None

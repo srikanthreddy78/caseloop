@@ -123,7 +123,10 @@ dashboard's `caseloop_session` cookie (people) and return `{"data": …}`; error
 | GET / POST | `/v1/orders`, `/v1/orders/import` | Search stored orders, push JSON rows, import CSV |
 | GET / PUT / POST | `/v1/orders/sources`, `/v1/orders/sources/test` | Configure live sources, test a lookup |
 | GET | `/v1/cases/{id}/orders` | Orders matching a case from every source |
+| GET | `/v1/cases/{id}/attachments/{index}` | Download a customer's photo or PDF (`index` as shown on the timeline) |
 | POST | `/v1/chat/sessions`, `/v1/chat/sessions/{token}/messages` | Used by the widget |
+| POST | `/v1/chat/sessions/{token}/attachments` | Widget photo upload (multipart, up to 5 images or PDFs of 8 MB) |
+| GET | `/v1/chat/sessions/{token}/stream` | Server-sent events for the widget: `message` and `state` events |
 | POST | `/webhooks/resend`, `/webhooks/dial` | Provider webhooks |
 
 Outbound webhooks (`case.created`, `case.state_changed`) are signed with

@@ -6,9 +6,11 @@ import uuid
 from typing import Annotated, Any
 
 from fastapi import APIRouter, HTTPException, Query, Response, status
+from fastapi.responses import FileResponse
 from sqlalchemy import func, select
 
 from app.api.deps import BusinessDep, RateLimitApi, ServicesDep, SessionDep
+from app.attachments import case_attachments, resolve_stored
 from app.cases import state as sm
 from app.cases.service import (
     cancel_pending_jobs,
@@ -160,6 +162,32 @@ async def get_timeline(
     case = await _case_or_404(session, business, case_id)
     items = await case_timeline(session, case.id)
     return DataOut(data=[TimelineItem.model_validate(i) for i in items])
+
+
+@router.get("/cases/{case_id}/attachments/{index}", response_class=FileResponse)
+async def get_case_attachment(
+    case_id: uuid.UUID,
+    index: int,
+    business: BusinessDep,
+    session: SessionDep,
+    services: ServicesDep,
+) -> FileResponse:
+    """Stream one of the case's attachments. `index` is the number shown on the timeline."""
+    case = await _case_or_404(session, business, case_id)
+    entries = case_attachments(case.messages)
+    if not 0 <= index < len(entries):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "attachment not found")
+    _, _, att = entries[index]
+    path = resolve_stored(services.settings.data_dir, att)
+    if path is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "attachment file is not available")
+    return FileResponse(
+        path,
+        media_type=str(att.get("content_type") or "application/octet-stream"),
+        filename=str(att.get("filename") or path.name),
+        content_disposition_type="inline",
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
 
 
 @router.post(
