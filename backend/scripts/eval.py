@@ -218,6 +218,12 @@ def judge(case: dict[str, Any], detail: dict[str, Any]) -> Outcome:
         problems.append(
             f"escalation.reason {'set' if escalated else 'missing'} "
             f"(want {'set' if expect.get('escalated') else 'unset'})"
+            + (
+                f": {(detail.get('escalation') or {}).get('reason')} — "
+                f"{str((detail.get('escalation') or {}).get('summary', ''))[:160]}"
+                if escalated
+                else ""
+            )
         )
     outbound = [m for m in detail["messages"] if m["direction"] == "outbound"]
     last = outbound[-1]["body_text"].lower() if outbound else ""
