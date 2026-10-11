@@ -62,3 +62,18 @@ async def test_widget_js_is_served(client: AsyncClient) -> None:
     assert resp.status_code == 200
     assert "javascript" in resp.headers["content-type"]
     assert "X-Widget-Key" in resp.text
+
+
+async def test_widget_cors_allows_any_origin(client: AsyncClient) -> None:
+    """The widget runs on customers' own sites (and file:// pages report origin "null")."""
+    resp = await client.options(
+        "/v1/chat/sessions",
+        headers={
+            "Origin": "https://some-shop.example",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type,x-widget-key",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.headers.get("access-control-allow-origin") == "*"
+    assert "x-widget-key" in resp.headers.get("access-control-allow-headers", "").lower()
