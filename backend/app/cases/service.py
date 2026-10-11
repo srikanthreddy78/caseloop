@@ -123,6 +123,9 @@ async def cancel_pending_jobs(
     )
     if kinds:
         stmt = stmt.where(Job.kind.in_(kinds))
+    else:
+        # These describe changes that already happened, even after the case closes.
+        stmt = stmt.where(Job.kind != JobKind.DELIVER_WEBHOOK)
     result = await session.execute(stmt)
     return int(getattr(result, "rowcount", 0) or 0)
 

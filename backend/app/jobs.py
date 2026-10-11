@@ -127,7 +127,9 @@ async def book_recurring(
         )
         .on_conflict_do_nothing(
             index_elements=["business_id", "kind"],
-            index_where=text("status = 'pending' AND case_id IS NULL"),
+            index_where=text(
+                "status = 'pending' AND case_id IS NULL AND kind IN ('insights', 'digest')"
+            ),
         )
     )
     result = await session.execute(stmt)

@@ -4,15 +4,17 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Annotated, Any
 
 from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
 from app.api.deps import BusinessDep, RateLimitApi, ServicesDep, SessionDep
 from app.models import Job, JobKind, JobStatus
+from app.scheduler import STALE_RUNNING_MINUTES
 from app.schemas import DataOut, ListOut, Meta
 
 log = logging.getLogger(__name__)
@@ -72,12 +74,18 @@ async def retry_job(
 ) -> DataOut[JobOut]:
     """Put a failed (or stuck) job back on the queue: pending, attempts reset, due now."""
     job = (
-        await session.execute(select(Job).where(Job.id == job_id, Job.business_id == business.id))
+        await session.execute(
+            select(Job).where(Job.id == job_id, Job.business_id == business.id).with_for_update()
+        )
     ).scalar_one_or_none()
     if job is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "job not found")
-    if job.status == JobStatus.PENDING:
-        raise HTTPException(status.HTTP_409_CONFLICT, "job is already pending")
+    stale = job.status == JobStatus.RUNNING and (
+        job.locked_at is None
+        or job.locked_at < services.clock.now() - timedelta(minutes=STALE_RUNNING_MINUTES)
+    )
+    if job.status != JobStatus.FAILED and not stale:
+        raise HTTPException(status.HTTP_409_CONFLICT, "only failed or stale jobs can be retried")
     if job.kind == JobKind.AGENT_TURN and job.case_id is not None:
         # At most one pending agent_turn per case (enforced by a partial unique index).
         clash = await session.execute(
@@ -94,7 +102,13 @@ async def retry_job(
     job.attempts = 0
     job.due_at = services.clock.now()
     job.locked_at = None
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "a replacement job is already queued"
+        ) from exc
     await session.refresh(job)
     log.info(
         "job retried",

@@ -24,3 +24,13 @@ from app.agent.requirements import canonical_key
 )
 def test_canonical_key(raw: str, expected: str) -> None:
     assert canonical_key(raw) == expected
+
+
+def test_spoken_email_is_recovered_from_transcripts() -> None:
+    from app.agent.runner import _spoken_email
+
+    assert (
+        _spoken_email("agent: Email: krishtandon@gmail.com\nuser: yes") == "krishtandon@gmail.com"
+    )
+    assert _spoken_email("my email is bridget tandon at gmail dot com") == "tandon@gmail.com"
+    assert _spoken_email("no contact here") is None

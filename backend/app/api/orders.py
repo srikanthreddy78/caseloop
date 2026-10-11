@@ -14,8 +14,9 @@ from sqlalchemy import select
 from app.api.deps import BusinessDep, OwnerDep, RateLimitApi, ServicesDep, SessionDep
 from app.models import Order
 from app.netguard import UnsafeUrlError, assert_public_url
-from app.orders.base import OrderQuery, OrderRecord, source_label
+from app.orders.base import OrderQuery, OrderRecord, ProviderNotConfigured, source_label
 from app.orders.imports import parse_csv, rows_to_records
+from app.orders.providers import validate_custom_api_config
 from app.orders.service import LIVE_TYPES, MASK, STORED_TYPES
 from app.orders.store import row_to_record, source_counts, upsert_orders
 from app.schemas import DataOut
@@ -203,6 +204,11 @@ async def put_sources(
                     f"{key} must be entered again"
                     + (": the destination changed" if old is not None else "")
                 )
+        if kind == "custom_api":
+            try:
+                validate_custom_api_config(merged)
+            except ProviderNotConfigured as exc:
+                raise _invalid(str(exc)) from exc
         cleaned.append(merged)
     settings = dict(business.settings or {})
     settings["order_sources"] = cleaned
@@ -254,10 +260,10 @@ async def push_orders(
 async def import_csv(
     payload: ImportCsvIn, business: BusinessDep, session: SessionDep, services: ServicesDep
 ) -> DataOut[ImportOut]:
-    rows = parse_csv(payload.csv)
-    if not rows:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "CSV has no data rows")
     try:
+        rows = parse_csv(payload.csv)
+        if not rows:
+            raise ValueError("CSV has no data rows")
         records = rows_to_records(rows, source=payload.source, mapping=payload.mapping)
     except ValueError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc

@@ -156,7 +156,11 @@ async def test_invalid_custom_source_config_is_rejected_before_it_breaks_lookup(
         "/v1/orders/sources",
         json={
             "order_sources": [
-                {"type": "custom_api", "url_template": "https://shop.example.com/{order_number}", field: value}
+                {
+                    "type": "custom_api",
+                    "url_template": "https://shop.example.com/{order_number}",
+                    field: value,
+                }
             ]
         },
     )

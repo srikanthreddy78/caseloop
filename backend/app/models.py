@@ -226,7 +226,9 @@ class Job(TimestampMixin, Base):
             "business_id",
             "kind",
             unique=True,
-            postgresql_where=text("status = 'pending' AND case_id IS NULL"),
+            postgresql_where=text(
+                "status = 'pending' AND case_id IS NULL AND kind IN ('insights', 'digest')"
+            ),
         ),
     )
 

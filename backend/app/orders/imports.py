@@ -102,5 +102,13 @@ def rows_to_records(
 
 
 def parse_csv(text: str) -> list[dict[str, Any]]:
-    reader = csv.DictReader(io.StringIO(text))
-    return [dict(r) for r in reader]
+    reader = csv.DictReader(io.StringIO(text.lstrip("\ufeff")), strict=True)
+    rows = []
+    try:
+        for row in reader:
+            if None in row:
+                raise ValueError(f"CSV row {reader.line_num} has more values than column headers")
+            rows.append(dict(row))
+    except csv.Error as exc:
+        raise ValueError(f"invalid CSV: {exc}") from exc
+    return rows

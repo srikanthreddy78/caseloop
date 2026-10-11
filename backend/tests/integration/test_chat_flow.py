@@ -64,6 +64,41 @@ async def test_widget_js_is_served(client: AsyncClient) -> None:
     assert "X-Widget-Key" in resp.text
 
 
+async def test_new_chat_cannot_retrieve_history_by_reusing_an_email(
+    client: AsyncClient, business: dict[str, Any]
+) -> None:
+    headers = {"X-Widget-Key": business["widget_public_key"]}
+    first = await client.post(
+        "/v1/chat/sessions",
+        json={"email": "pat@customer-mail.co", "message": "Private order details"},
+        headers=headers,
+    )
+    assert first.status_code == 201
+    original = first.json()
+    reply = await client.post(
+        f"/v1/chat/sessions/{original['token']}/messages",
+        json={"text": "More private details"},
+    )
+    assert reply.status_code == 201
+
+    second = await client.post(
+        "/v1/chat/sessions",
+        json={"email": "pat@customer-mail.co", "message": "A separate inquiry"},
+        headers=headers,
+    )
+    assert second.status_code == 201
+    fresh = second.json()
+    assert fresh["case_id"] != original["case_id"]
+    assert [m["text"] for m in fresh["messages"]] == ["A separate inquiry"]
+
+    resumed = await client.get(f"/v1/chat/sessions/{original['token']}/messages")
+    assert resumed.status_code == 200
+    assert [m["text"] for m in resumed.json()["messages"]] == [
+        "Private order details",
+        "More private details",
+    ]
+
+
 async def test_widget_cors_allows_any_origin(client: AsyncClient) -> None:
     """The widget runs on customers' own sites (and file:// pages report origin "null")."""
     resp = await client.options(

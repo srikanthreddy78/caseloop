@@ -117,6 +117,26 @@ async def _assert_public(url: str, *, allow_localhost: bool) -> None:
     await asyncio.to_thread(assert_public_url, url, allow_localhost=allow_localhost)
 
 
+def validate_custom_api_config(config: dict[str, Any]) -> None:
+    """Reject settings that cannot be interpreted as headers or dotted field paths."""
+    for field in ("headers", "mapping"):
+        value = config.get(field)
+        if value is None:
+            continue
+        if not isinstance(value, dict):
+            raise ProviderNotConfigured(f"{field} must be a JSON object")
+        for key, item in value.items():
+            if field == "mapping" and key == "status_map":
+                if not isinstance(item, dict) or not all(
+                    isinstance(k, str) and isinstance(v, str) for k, v in item.items()
+                ):
+                    raise ProviderNotConfigured("mapping.status_map must map statuses to strings")
+            elif not isinstance(key, str) or not isinstance(item, str):
+                raise ProviderNotConfigured(f"{field} must map names to strings")
+    if config.get("list_path") is not None and not isinstance(config["list_path"], str):
+        raise ProviderNotConfigured("list_path must be a string")
+
+
 class CustomApiProvider:
     """The business's own JSON endpoint. Config:
     {"type": "custom_api", "url_template": "https://x/orders/{order_number}", "headers": {...},
@@ -133,6 +153,7 @@ class CustomApiProvider:
     source = "custom_api"
 
     def __init__(self, config: dict[str, Any], *, allow_localhost: bool = False) -> None:
+        validate_custom_api_config(config)
         self.source_id = _source_id(config, self.source)
         self.url_template = str(config.get("url_template") or "")
         self.email_url_template = config.get("email_url_template")

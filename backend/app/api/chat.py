@@ -39,7 +39,6 @@ from app.attachments import (
 from app.auth import business_for_widget_key
 from app.cases.service import (
     append_inbound,
-    find_case_for_customer,
     get_or_create_customer,
     load_case,
     open_case,
@@ -169,18 +168,11 @@ async def start_session(
     customer = await get_or_create_customer(
         session, business, email=str(payload.email), name=payload.name
     )
-    case, needs_reopen = await find_case_for_customer(
-        session,
-        business,
-        customer,
-        now=now,
-        reopen_window_days=services.settings.reopen_window_days,
+    # An email address is not proof of identity. Only an existing session token may
+    # resume a transcript; a new token must never reveal another chat's history.
+    case = await open_case(
+        session, business, customer, channel=Channel.WEBCHAT, now=now, subject="Website chat"
     )
-    if case is None or needs_reopen or case.channel != Channel.WEBCHAT:
-        # A fresh chat gets its own webchat case even if an email case exists; the agent sees both.
-        case = await open_case(
-            session, business, customer, channel=Channel.WEBCHAT, now=now, subject="Website chat"
-        )
     chat = ChatSession(
         business_id=business.id,
         case_id=case.id,

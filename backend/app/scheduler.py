@@ -12,6 +12,7 @@ from datetime import timedelta
 from typing import Any
 
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.clock import Clock
@@ -65,15 +66,61 @@ class Scheduler:
     async def reclaim_stale(self, session: AsyncSession) -> int:
         """Jobs a dead process left as running go back to pending so they are retried."""
         cutoff = self.clock.now() - timedelta(minutes=STALE_RUNNING_MINUTES)
-        result = await session.execute(
-            update(Job)
-            .where(Job.status == JobStatus.RUNNING, Job.locked_at < cutoff)
-            .values(
-                status=JobStatus.PENDING, locked_at=None, last_error="reclaimed after a stale run"
+        jobs = (
+            (
+                await session.execute(
+                    select(Job)
+                    .where(Job.status == JobStatus.RUNNING, Job.locked_at < cutoff)
+                    .with_for_update(skip_locked=True)
+                )
             )
+            .scalars()
+            .all()
         )
+        for job in jobs:
+            await self._finish_run(
+                session,
+                job,
+                {
+                    "status": JobStatus.PENDING,
+                    "locked_at": None,
+                    "last_error": "reclaimed after a stale run",
+                },
+            )
         await session.commit()
-        return int(getattr(result, "rowcount", 0) or 0)
+        return len(jobs)
+
+    async def _finish_run(self, session: AsyncSession, job: Job, values: dict[str, Any]) -> None:
+        # A late worker must not overwrite a newer attempt or a manual retry.
+        stmt = update(Job).where(
+            Job.id == job.id,
+            Job.status == JobStatus.RUNNING,
+            Job.locked_at == job.locked_at,
+            Job.attempts == job.attempts,
+        )
+        try:
+            async with session.begin_nested():
+                await session.execute(
+                    stmt.values(**values).execution_options(synchronize_session=False)
+                )
+        except IntegrityError as exc:
+            if not any(
+                name in str(exc.orig)
+                for name in (
+                    "uq_jobs_single_pending_agent_turn",
+                    "uq_jobs_single_pending_recurring",
+                )
+            ):
+                raise
+            # Another pending turn reads the latest case; a recurring successor already
+            # carries the next run. Retrying this older job would block the whole queue.
+            await session.execute(
+                stmt.values(
+                    status=JobStatus.CANCELLED,
+                    locked_at=None,
+                    last_error="superseded by an already pending job",
+                ).execution_options(synchronize_session=False)
+            )
 
     async def run_due_jobs(self, limit: int = 10, business_id: uuid.UUID | None = None) -> int:
         """Run every due job once (only one business's with business_id). Returns how many ran."""
@@ -113,7 +160,8 @@ class Scheduler:
                     "due_at": self.clock.now() + delay,
                     "locked_at": None,
                 }
-            await session.execute(update(Job).where(Job.id == job.id).values(**values))
+            values["locked_at"] = None
+            await self._finish_run(session, job, values)
             await session.commit()
 
     async def run_forever(self, poll_seconds: float) -> None:

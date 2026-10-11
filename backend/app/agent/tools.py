@@ -373,7 +373,7 @@ class CaseTools:
         )
         ctx.session.add(msg)
         rfc_id = (result.thread_ids or {}).get("rfc_message_id")
-        if ctx.case.channel == Channel.EMAIL and rfc_id:
+        if channel == Channel.EMAIL and rfc_id:
             ids = list(ctx.case.email_thread_message_ids or [])
             ids.append(rfc_id)
             ctx.case.email_thread_message_ids = ids

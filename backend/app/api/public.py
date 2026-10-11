@@ -229,11 +229,11 @@ async def human_reply(
     """
     case = await _case_or_404(session, business, case_id)
     now = services.clock.now()
-    sent, error, _channel = await _deliver(services, business, case, payload.text)
+    sent, error, channel = await _deliver(services, business, case, payload.text)
     msg = Message(
         case_id=case.id,
         direction=Direction.OUTBOUND,
-        channel=case.channel,
+        channel=channel,
         sender=Sender.HUMAN,
         body_text=payload.text,
         provider_message_id=sent.provider_message_id,
@@ -250,7 +250,7 @@ async def human_reply(
         case_id=case.id,
         type="delivery_failed" if error else "message_sent",
         actor=Sender.HUMAN,
-        data={"message_id": str(msg.id), "channel": case.channel, "error": error},
+        data={"message_id": str(msg.id), "channel": channel, "error": error},
     )
     await session.commit()
     if error:
@@ -364,7 +364,7 @@ async def _deliver(
 def _mark_delivered(case: Case, msg: Message, sent: SendResult, now: datetime) -> None:
     """What a delivered outbound message changes on the case, mirroring the agent's tool."""
     rfc_id = (sent.thread_ids or {}).get("rfc_message_id")
-    if case.channel == Channel.EMAIL and rfc_id:
+    if msg.channel == Channel.EMAIL and rfc_id:
         case.email_thread_message_ids = [*(case.email_thread_message_ids or []), rfc_id]
     case.last_agent_message_at = now
     if msg.sender == Sender.AGENT:
@@ -383,6 +383,15 @@ async def human_resolve(
 ) -> DataOut[CaseDetailOut]:
     case = await _case_or_404(session, business, case_id)
     try:
+        if case.state in (CaseState.NEW, CaseState.ABANDONED):
+            await transition_case(
+                session,
+                case,
+                CaseState.GATHERING,
+                actor=Sender.HUMAN,
+                now=services.clock.now(),
+                data={"reason": "human_resolution"},
+            )
         await transition_case(
             session,
             case,
