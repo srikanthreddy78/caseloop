@@ -14,6 +14,7 @@ const lookup = { found: [order("LOOKUP")], sources_checked: ["CSV import"], erro
 const OrderCard = () => null;
 const SourceBadge = () => null;
 const OrderSources = () => null;
+const Lessons = () => null;
 const Queue = () => null;
 const Team = () => null;
 const sourcesUrl = new URL("../src/components/OrderSources.tsx", import.meta.url);
@@ -217,6 +218,7 @@ test("Setup isolates source and team forms and escapes the copied widget name", 
     context,
     imports: {
       "../components/OrderSources": { OrderSources }, "../components/Queue": { Queue }, "../components/Team": { Team },
+      "../components/Lessons": { Lessons },
     },
   });
   t.after(() => component.cleanup());

@@ -180,19 +180,32 @@
   let session = load();
   let open = false, pollTimer = null, stream = null, lastSeen = null, seenIds = new Set();
   let curState = null, lastDirection = null, pending = [];
+  let restoring = false, pollVersion = 0, pollPending = false;
 
   function load() { try { return JSON.parse(localStorage.getItem(STORE) || "null"); } catch { return null; } }
-  function save(s) { session = s; if (s) localStorage.setItem(STORE, JSON.stringify(s)); else localStorage.removeItem(STORE); }
+  function save(s) {
+    session = s;
+    try { if (s) localStorage.setItem(STORE, JSON.stringify(s)); else localStorage.removeItem(STORE); }
+    catch { /* Keep the current chat usable when the browser blocks storage. */ }
+  }
 
   async function api(path, opts = {}) {
     const json = !(opts.body instanceof FormData);
     const res = await fetch(BASE + path, { ...opts, headers: { ...(json ? { "Content-Type": "application/json" } : {}), "X-Widget-Key": KEY, ...(opts.headers || {}) } });
     const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error((body.error && body.error.message) || `Request failed (${res.status})`);
+    if (!res.ok) {
+      const error = new Error((body.error && body.error.message) || `Request failed (${res.status})`);
+      error.status = res.status;
+      throw error;
+    }
     return body;
   }
 
   function renderStart() {
+    stopLive();
+    clearPending();
+    seenIds = new Set(); lastSeen = null; lastDirection = null; curState = null;
+    statusEl.textContent = "Tell us what went wrong. We'll sort it out here.";
     view.innerHTML = `
       <form class="start" novalidate>
         <p>Leave your email so we can keep helping even if you close this tab.</p>
@@ -205,6 +218,7 @@
     const form = $("form.start"), err = $(".error");
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
+      if (form.querySelector(".primary").disabled) return;
       const data = Object.fromEntries(new FormData(form).entries());
       if (!data.email || !data.message) { err.textContent = "Email and a message are needed to start."; return; }
       form.querySelector(".primary").disabled = true;
@@ -217,10 +231,11 @@
         form.querySelector(".primary").disabled = false;
       }
     });
-    setTimeout(() => $("#cl-email") && $("#cl-email").focus(), 50);
+    setTimeout(() => open && $("#cl-email") && $("#cl-email").focus(), 50);
   }
 
   function renderChat(messages, state) {
+    clearPending();
     view.innerHTML = `
       <div class="body" aria-live="polite"></div>
       <form class="compose">
@@ -239,14 +254,16 @@
     setStatus(state);
     const form = $("form.compose"), ta = form.querySelector("textarea"), btn = form.querySelector(".send");
     const picker = form.querySelector("input[type=file]"), attach = form.querySelector(".attach");
-    ta.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); } });
+    ta.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); form.requestSubmit(); } });
     ta.addEventListener("input", () => { ta.style.height = "auto"; ta.style.height = Math.min(ta.scrollHeight, 120) + "px"; });
     attach.addEventListener("click", () => picker.click());
     picker.addEventListener("change", () => { addPending(Array.from(picker.files || [])); picker.value = ""; ta.focus(); });
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
+      if (btn.disabled || !session) return;
       const text = ta.value.trim();
       const files = pending.slice();
+      const token = session.token;
       if (!text && !files.length) return;
       btn.disabled = true; attach.disabled = true; ta.value = ""; ta.style.height = "auto";
       try {
@@ -255,20 +272,22 @@
           const fd = new FormData();
           for (const p of files) fd.append("files", p.file, p.file.name);
           if (text) fd.append("caption", text);
-          out = await api(`/v1/chat/sessions/${session.token}/attachments`, { method: "POST", body: fd });
-          clearPending();
+          out = await api(`/v1/chat/sessions/${token}/attachments`, { method: "POST", body: fd });
         } else {
-          out = await api(`/v1/chat/sessions/${session.token}/messages`, { method: "POST", body: JSON.stringify({ text }) });
+          out = await api(`/v1/chat/sessions/${token}/messages`, { method: "POST", body: JSON.stringify({ text }) });
         }
+        if (!session || session.token !== token || $("form.compose") !== form) return;
+        for (const file of files) removePending(file);
         appendMessages(out.messages, true); setStatus(out.state);
       } catch (ex) {
-        if (/not found/i.test(ex.message)) { save(null); renderStart(); return; }
-        if (text) ta.value = text;
+        if (!session || session.token !== token || $("form.compose") !== form) return;
+        if (ex.status === 404) { save(null); renderStart(); return; }
+        if (text) ta.value = text + (ta.value ? "\n" + ta.value : "");
         notice(ex.message);
-      } finally { btn.disabled = false; attach.disabled = false; ta.focus(); }
+      } finally { btn.disabled = false; attach.disabled = false; if (open && $("form.compose") === form) ta.focus(); }
     });
     startLive();
-    setTimeout(() => ta.focus(), 50);
+    setTimeout(() => open && ta.focus(), 50);
   }
 
   function addPending(files) {
@@ -306,13 +325,16 @@
 
   function appendMessages(list, animate) {
     const body = $(".body");
-    if (!body) return;
     let added = 0;
     for (const m of list) {
       if (seenIds.has(m.id)) continue;
       seenIds.add(m.id);
-      const el = document.createElement("div");
       const mine = m.direction === "inbound";
+      if (!lastSeen || m.at > lastSeen) lastSeen = m.at;
+      lastDirection = m.direction;
+      if (!mine) added++;
+      if (!body) continue;
+      const el = document.createElement("div");
       el.className = `msg ${mine ? "me" : "them"}${m.sender === "human" ? " human" : ""}${animate ? " enter" : ""}`;
       const who = document.createElement("span"); who.className = "who";
       who.textContent = mine ? "You" : (m.sender === "human" ? `${NAME} team` : NAME);
@@ -323,12 +345,9 @@
       if (files.length) el.appendChild(renderFiles(m, files));
       body.appendChild(el);
       if (animate) requestAnimationFrame(() => requestAnimationFrame(() => el.classList.remove("enter")));
-      if (!lastSeen || m.at > lastSeen) lastSeen = m.at;
-      lastDirection = m.direction;
-      if (!mine) added++;
     }
     updateTyping();
-    body.scrollTop = body.scrollHeight;
+    if (body) body.scrollTop = body.scrollHeight;
     if (added && !open) launch.classList.add("has-news");
   }
 
@@ -370,31 +389,36 @@
   function setStatus(state) { curState = state; statusEl.textContent = STATE_COPY[state] || "We're on it."; updateTyping(); }
 
   async function poll() {
-    if (!session) return;
+    if (!session || pollPending) return;
+    const token = session.token, version = pollVersion;
+    pollPending = true;
     try {
       const q = lastSeen ? `?after=${encodeURIComponent(lastSeen)}` : "";
-      const out = await api(`/v1/chat/sessions/${session.token}/messages${q}`);
+      const out = await api(`/v1/chat/sessions/${token}/messages${q}`);
+      if (version !== pollVersion || !session || session.token !== token) return;
       appendMessages(out.messages, true); setStatus(out.state);
     } catch (ex) {
-      if (/not found/i.test(ex.message)) { stopPolling(); save(null); if (open) renderStart(); }
-    }
+      if (version === pollVersion && session && session.token === token && ex.status === 404) { save(null); renderStart(); }
+    } finally { if (version === pollVersion) pollPending = false; }
   }
-  function startPolling() { stopPolling(); poll(); pollTimer = setInterval(() => { if (!document.hidden) poll(); }, POLL_MS); }
-  function stopPolling() { if (pollTimer) clearInterval(pollTimer); pollTimer = null; }
+  function startPolling() { stopPolling(); if (!session) return; poll(); pollTimer = setInterval(() => { if (!document.hidden) poll(); }, POLL_MS); }
+  function stopPolling() { if (pollTimer) clearInterval(pollTimer); pollTimer = null; pollVersion++; pollPending = false; }
 
   // Live updates: server-sent events when the browser has them, 3 s polling otherwise.
   function startLive() {
     stopLive();
-    if (!session || typeof EventSource === "undefined") { startPolling(); return; }
+    if (!session) return;
+    if (!open || typeof EventSource === "undefined") { startPolling(); return; }
     const q = lastSeen ? `?after=${encodeURIComponent(lastSeen)}` : "";
     let es;
     try { es = new EventSource(`${BASE}/v1/chat/sessions/${session.token}/stream${q}`); } catch { startPolling(); return; }
     stream = es;
-    es.addEventListener("message", (e) => { try { appendMessages([JSON.parse(e.data)], true); } catch { /* ignore a bad frame */ } });
+    es.addEventListener("message", (e) => { if (stream !== es) return; try { appendMessages([JSON.parse(e.data)], true); } catch { /* ignore a bad frame */ } });
     es.addEventListener("state", (e) => {
+      if (stream !== es) return;
       try {
         const { state } = JSON.parse(e.data);
-        if (state === "closed") { stopLive(); save(null); if (open) renderStart(); return; }
+        if (state === "closed") { save(null); renderStart(); return; }
         setStatus(state);
       } catch { /* ignore a bad frame */ }
     });
@@ -408,11 +432,23 @@
   function stopLive() { stopPolling(); if (stream) { stream.close(); stream = null; } }
 
   async function resume() {
-    if (!session) { renderStart(); return; }
+    if (!session) { if (!$("form.start")) renderStart(); return; }
+    if ($("form.compose")) { startLive(); return; }
+    if (restoring) return;
+    stopLive();
+    restoring = true;
+    const token = session.token;
     try {
-      const out = await api(`/v1/chat/sessions/${session.token}/messages`);
+      const out = await api(`/v1/chat/sessions/${token}/messages`);
+      if (!session || session.token !== token) return;
       renderChat(out.messages, out.state);
-    } catch { save(null); renderStart(); }
+    } catch (ex) {
+      if (!session || session.token !== token) return;
+      if (ex.status === 404) { save(null); renderStart(); return; }
+      view.innerHTML = '<form class="start retry"><div class="error" aria-live="polite"></div><button class="primary" type="submit">Retry</button></form>';
+      $(".error").textContent = ex.message;
+      $("form.retry").addEventListener("submit", (e) => { e.preventDefault(); return resume(); });
+    } finally { restoring = false; }
   }
 
   function setOpen(next) {
@@ -420,7 +456,7 @@
     panel.classList.toggle("open", open);
     panel.setAttribute("aria-hidden", String(!open));
     launch.setAttribute("aria-expanded", String(open));
-    if (open) { launch.classList.remove("has-news"); resume(); } else { stopLive(); }
+    if (open) { launch.classList.remove("has-news"); resume(); } else { startLive(); }
   }
   launch.addEventListener("click", () => setOpen(!open));
   $(".close").addEventListener("click", () => setOpen(false));
@@ -429,4 +465,5 @@
   document.body.appendChild(host);
   if (session) { startPolling(); }
   window.addEventListener("pagehide", stopLive);
+  window.addEventListener("pageshow", (e) => { if (e.persisted && session) startLive(); });
 })();

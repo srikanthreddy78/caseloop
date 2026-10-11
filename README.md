@@ -1,49 +1,50 @@
 # Caseloop
 
-Autonomous customer-issue resolution for any business. A customer writes in with a
-complaint, a return, a billing question, anything. Caseloop takes the case, works out
-what it needs to resolve it, keeps following up with the customer on its own until it
-has everything, closes the case or hands it to a person, and tells the business what
-people are unhappy about and why.
+Caseloop helps a business handle customer support from the first message to the final follow-up.
+It brings email, website chat, texts, and phone conversations into one place, asks customers
+for missing details, and hands cases to your team when a person needs to make a decision.
 
-Attach it to what you already run:
+For example, a customer says their lamp arrived broken. Caseloop checks the order,
+asks for photos, follows up if they do not reply, and records the outcome or sends your
+team a summary of what needs attention.
 
-| Channel | How |
+## What you can do
+
+- **Manage cases:** see the conversation, attachments, order details, and next steps together.
+- **Keep customers updated:** let the agent ask questions and follow up using your business policy.
+- **Take over when needed:** reply yourself, resolve a case, or retry a message that failed to send.
+- **Understand recurring problems:** the Feedback page groups recent complaints into themes and suggested fixes.
+- **Teach the agent:** human replies and decisions become lessons you can review in Setup.
+
+## How a case moves through Caseloop
+
+1. A customer contacts you through email, chat, SMS, a call, or your API integration.
+2. Caseloop opens a case and works out what information is needed.
+3. The agent checks connected orders and asks the customer for anything missing.
+4. If the customer goes quiet, it follows up on your schedule. The default waits are 24 hours,
+   then 72 hours, then 7 days between nudges.
+5. The case is resolved or handed to a person with its history and a summary. Cases with no
+   reply after the follow-up limit are marked abandoned and handed off.
+
+You can change the policy, follow-up schedule, and hand-off email in **Setup**.
+The timeline records messages, state changes, and the agent's actions. Email hand-offs,
+optional Slack alerts, and a daily digest help your team keep track of open work.
+
+## Connect your support channels
+
+| Channel | How it connects |
 |---|---|
-| Email | Forward `support@` to the business's inbound address (Resend Receiving) |
-| Website chat | One `<script>` tag, served from this app |
-| SMS and AI phone calls | Dial (getdial.ai) number on the business |
-| Anything else | `POST /v1/cases` with an API key, plus signed webhooks back to you |
-
-## How it works
-
-```
-inbound message ──► case (new) ──► agent turn ──► ask for what's missing ──► awaiting_customer
-                                       │                                          │
-                                       │ everything in hand                       │ follow-ups at 24h, 72h, 7d
-                                       ▼                                          ▼
-                                   resolved                     reply ──► agent turn      no reply ──► abandoned ──► hand-off email
-                                   (or escalated to a person with a packaged summary)
-```
-
-- The agent only acts through tools: `get_case`, `update_requirements`, `send_message`,
-  `schedule_followup`, `close_case`, `escalate`, `request_phone_call`, `add_internal_note`.
-  Guardrails live in code, not only in the prompt (one message per turn, follow-ups clamped to
-  policy, cannot close with requirements missing, card and ID numbers scrubbed from prompts).
-- Every state change, message, and tool call is an event on the case timeline.
-- Insights: a 30-day report (themes, root causes, suggested fixes, escalation reasons) is
-  regenerated daily per business and on demand.
-- Hand-offs go to the business's escalation email and, if configured, a Slack webhook; a daily
-  digest email lists open cases by state, who has been waiting longest, and what needs a person.
-- One FastAPI process: HTTP API, webhook receivers, and a Postgres-backed job queue
-  (agent turns, follow-ups, transcripts, insights, outbound webhooks). No Redis.
+| Email | Forward support mail to your business's inbound address through Resend |
+| Website chat | Copy the script snippet from Setup into your website |
+| SMS and calls | Connect a Dial number to your business |
+| Your own app | Create cases with `POST /v1/cases` and receive signed webhooks |
 
 ## Orders from anywhere
 
 The agent can only resolve what it can see, so Caseloop takes orders from whatever a business
 already has and labels every order with its source (Shopify, Amazon, Your website API, Tracking
-page, Forwarded email, CSV import, Pushed via API). The agent names the source when it uses the
-facts ("I found order 1234 in Shopify, delivered 12 Sep") and uses delivery dates for policy windows.
+page, Forwarded email, CSV import, Pushed via API). Source labels are visible to your team; customer replies focus on the order facts.
+Delivery dates help the agent check policy windows.
 
 | Business has… | Connect it by… |
 |---|---|
@@ -51,25 +52,43 @@ facts ("I found order 1234 in Shopify, delivered 12 Sep") and uses delivery date
 | Their own API or tracking system | Setup → "Your website API": URL pattern with `{order_number}`, optional headers, field mapping. Test it on the Orders page |
 | Only a tracking page on their site | Setup → "Tracking page": page URL pattern; the page is read and extracted |
 | No API at all | Auto-forward order confirmation emails to `orders@<inbound domain>` (list the store's sending addresses or domains under Orders → "Accept order emails from"; mail from anyone else is ignored), or upload a CSV on the Orders page, or `POST /v1/orders` |
-| Amazon | Setup → Amazon (Selling Partner API credentials); CSV export works today |
+| Amazon | Import a CSV export or forward order emails. Live Selling Partner API lookup is not implemented yet |
 
 ## Run it locally
 
-Requirements: Python 3.12+, [uv](https://docs.astral.sh/uv/), Node 20+, Postgres 16
+You need Python 3.12+, [uv](https://docs.astral.sh/uv/), Node 20.19+ or 22.12+, and Postgres 16
 (Homebrew or `docker compose up -d db`).
 
+Start from the repository root. Copy the environment file, then edit `backend/.env`.
+Set `CASELOOP_DATABASE_URL` to your local database. For a first run without provider accounts,
+set `CASELOOP_AGENT_RUNNER=scripted` and leave `OPENAI_API_KEY`, `RESEND_API_KEY`,
+`DIAL_API_KEY`, and both webhook secrets empty. Remove the example key values.
+
 ```bash
-cp .env.example backend/.env           # set OPENAI_API_KEY and CASELOOP_DATABASE_URL
+cp .env.example backend/.env
 make install                           # backend deps
 make db-create && make migrate         # local Postgres databases + schema
 make create-business ARGS="--name 'Acme Lamps' --slug acme --inbound-email support@acme.example --escalation-email ops@acme.example"
 make dev                               # http://localhost:8000
 ```
 
+If you use the Postgres container from this repository, run the database creation command as
+`PGUSER=postgres PGPASSWORD=postgres make db-create`. For a local Postgres installation,
+use its username and password in both the connection URL and the `psql` environment.
+
+Keep the server running. In another terminal, build the dashboard:
+
+```bash
+cd dashboard
+npm ci
+npm run build
+```
+
+Open **http://localhost:8000/dashboard**.
+
 Then:
 
-- Dashboard: build it once with `cd dashboard && npm install && npm run build`, open
-  `http://localhost:8000/dashboard`, and sign in with the `--escalation-email` address (the
+- Sign in with the `--escalation-email` address (the
   business owner). A single-use link is emailed through Resend; in dev the link is also
   logged and shown on screen, so no mailbox is needed. Owners add teammates under Setup → Team.
   To give someone owner access from the shell:
@@ -115,6 +134,11 @@ For local testing expose port 8000 with a tunnel such as ngrok.
 
 ## API
 
+The interactive API reference is available at **http://localhost:8000/docs** while the server runs.
+
+<details>
+<summary>Endpoints, authentication, and request limits</summary>
+
 All business endpoints take `Authorization: Bearer <api_key>` (integrations) or the
 dashboard's `caseloop_session` cookie (people) and return `{"data": …}`; errors are
 `{"error": {"code", "message"}}`.
@@ -125,7 +149,7 @@ dashboard's `caseloop_session` cookie (people) and return `{"data": …}`; error
 | GET | `/v1/auth/me` | Signed-in member and their business |
 | GET / POST / DELETE | `/v1/team`, `/v1/team/{id}` | List, add (owners), remove (owners) team members |
 | GET / PATCH | `/v1/businesses/me` | Policy text, follow-up schedule, hand-off email, webhook URL, Slack alert URL |
-| GET | `/v1/cases?state=open,gathering&limit=&offset=` | List cases |
+| GET | `/v1/cases?state=new,gathering,awaiting_customer&limit=50&offset=0` | List cases |
 | POST | `/v1/cases` | Open a case from any source |
 | GET | `/v1/cases/{id}` and `/timeline` | Case file and full history |
 | POST | `/v1/cases/{id}/messages` | A person replies on the customer's channel |
@@ -149,6 +173,8 @@ links 10 a minute per IP and 3 per address every 10 minutes. Over the limit is a
 Outbound webhooks (`case.created`, `case.state_changed`) are signed with
 `X-Caseloop-Signature: t=<unix>,v1=<hmac-sha256 of "t.body">` using the business's secret.
 
+</details>
+
 ## Deploy
 
 The image is built from `backend/Dockerfile` with the repo root as context (it bundles the widget and
@@ -166,7 +192,13 @@ directly). Behind a platform proxy, set `FORWARDED_ALLOW_IPS` to the proxy's add
 reverse proxy use its IP or CIDR). CI (`.github/workflows/ci.yml`) runs ruff, mypy, pytest
 against a Postgres service, the dashboard build, and a Docker image build on every push and PR.
 
-## Develop
+## Development and tests
+
+The backend uses FastAPI and PostgreSQL. The dashboard uses React, TypeScript, and Vite;
+the chat widget is plain JavaScript. The API and background scheduler run in one process,
+with PostgreSQL storing queued jobs.
+
+Run the backend checks from the repository root:
 
 ```bash
 make test        # pytest against caseloop_test
@@ -175,6 +207,23 @@ make typecheck   # mypy
 make eval        # 25 scripted customer conversations (backend/evals/cases.yaml), scripted agent
 make eval-live   # same cases driven by the real model; costs money, expects 80% to pass
 ```
+
+Run the dashboard and widget checks after `npm ci`:
+
+```bash
+cd dashboard
+npm run lint
+node --test tests/*.test.mjs ../widget/tests/*.test.cjs
+npm run build
+```
+
+CI runs backend lint, formatting, type checks, and PostgreSQL tests, plus dashboard and widget
+regression tests, the frontend build, and a Docker image build.
+
+The scripted demo and evaluations use an empty scratch database and fake delivery channels.
+`make demo-live` and `make eval-live` use your OpenAI key and incur model charges.
+Order integrations read order data; recording a case resolution does not itself execute a
+refund or create a replacement shipment in your store.
 
 Layout: `backend/app` (FastAPI app: `cases/` state machine and service, `agent/` prompts,
 tools, runners, `channels/` adapters, `api/` routers, `scheduler.py`, `insights/`),

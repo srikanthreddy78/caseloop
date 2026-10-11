@@ -81,6 +81,11 @@ jobs:
           cache-dependency-path: dashboard/package-lock.json
 
       - run: npm ci
+      - run: npm run lint
+      - name: Dashboard workflow regressions
+        run: node --test tests/*.test.mjs
+      - name: Widget workflow regressions
+        run: node --test ../widget/tests/*.test.cjs
       - run: npm run build
 
   docker:
