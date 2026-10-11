@@ -15,5 +15,29 @@ services:
       timeout: 3s
       retries: 10
 
+  # The whole product in one container: API, webhooks, job scheduler, widget, dashboard.
+  # Runs `alembic upgrade head` on start. Provider keys come from backend/.env (optional).
+  app:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    env_file:
+      - path: backend/.env
+        required: false
+    environment:
+      CASELOOP_ENV: ${CASELOOP_ENV:-prod}
+      CASELOOP_BASE_URL: ${CASELOOP_BASE_URL:-http://localhost:8000}
+      CASELOOP_DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/caseloop
+      CASELOOP_DATA_DIR: /data
+    ports:
+      - "8000:8000"
+    volumes:
+      - caseloop_data:/data
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   caseloop_pg:
+  caseloop_data:
