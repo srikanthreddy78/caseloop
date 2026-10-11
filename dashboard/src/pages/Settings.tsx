@@ -1,12 +1,13 @@
 import { useState } from "react";
 import { useOutletContext } from "react-router-dom";
 import { api } from "../api";
-import type { Business } from "../types";
+import type { Business, ShellContext } from "../types";
 import { OrderSources } from "../components/OrderSources";
 import { Queue } from "../components/Queue";
+import { Team } from "../components/Team";
 
 export function Settings() {
-  const { business, setBusiness } = useOutletContext<{ business: Business; setBusiness: (b: Business) => void }>();
+  const { business, setBusiness, member } = useOutletContext<ShellContext>();
   const [form, setForm] = useState({
     context_text: business.context_text,
     escalation_email: business.escalation_email,
@@ -77,6 +78,7 @@ export function Settings() {
         <div className="border-t border-line pt-6"><OrderSources /></div>
         <div className="border-t border-line pt-6"><Queue /></div>
       </form>
+      <div className="border-t border-line pt-6"><Team member={member} /></div>
 
       <aside className="flex flex-col gap-6 text-sm">
         <div>

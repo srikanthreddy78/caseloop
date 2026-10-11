@@ -8,10 +8,13 @@ export class ApiError extends Error {
   constructor(status: number, message: string) { super(message); this.status = status; }
 }
 
+// People sign in with an emailed link and carry an httpOnly session cookie; an API key in
+// localStorage (the old flow, still accepted) is sent as a bearer token when present.
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const key = getApiKey();
   const res = await fetch(path, {
     ...init,
+    credentials: "include",
     headers: { "Content-Type": "application/json", ...(key ? { Authorization: `Bearer ${key}` } : {}), ...(init.headers || {}) },
   });
   const body = await res.json().catch(() => ({}));

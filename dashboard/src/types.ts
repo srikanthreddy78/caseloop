@@ -18,6 +18,9 @@ export interface Business {
   allowed_origins: string[];
 }
 export interface Job { id: string; kind: string; status: "pending" | "running" | "done" | "failed" | "cancelled"; case_id: string | null; attempts: number; due_at: string; last_error: string | null; payload: Record<string, unknown>; created_at: string; updated_at: string }
+export interface Member { id: string; email: string; name: string; role: "owner" | "member"; created_at: string }
+export interface Session { member: Member; business: Business }
+export interface ShellContext { business: Business; setBusiness: (b: Business) => void; member: Member | null }
 export interface Theme { name: string; share_pct: number; example_case_ids: string[]; root_causes: string[]; suggested_fixes: string[] }
 export interface InsightsReport { headline: string; themes: Theme[]; sentiment_trend: string; emerging_issues: string[]; top_escalation_reasons: string[] }
 export interface Snapshot { id: string; period_start: string; period_end: string; case_count: number; model: string; report: InsightsReport; generated_at: string }

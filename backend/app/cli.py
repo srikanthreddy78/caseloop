@@ -35,6 +35,7 @@ async def _create_business(args: argparse.Namespace) -> int:
     print(f"api_key={api_key}   (shown once; store it now)")
     print(f"widget_public_key={business.widget_public_key}")
     print(f"inbound_email={business.inbound_email}")
+    print(f"dashboard: sign in at {settings.base_url}/dashboard as {business.escalation_email}")
     return 0
 
 
