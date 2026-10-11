@@ -356,3 +356,18 @@ class DashboardSession(TimestampMixin, Base):
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     member: Mapped[TeamMember] = relationship(lazy="selectin")
+
+
+class Lesson(TimestampMixin, Base):
+    """Something the business taught the agent: a human override, reply, or decision on a case."""
+
+    __tablename__ = "lessons"
+    __table_args__ = (Index("ix_lessons_business_active", "business_id", "active"),)
+
+    id: Mapped[uuid.UUID] = _uuid_col()
+    business_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("businesses.id", ondelete="CASCADE"))
+    case_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("cases.id", ondelete="SET NULL"))
+    kind: Mapped[str] = mapped_column(String(32))
+    category: Mapped[str | None] = mapped_column(String(32))
+    text: Mapped[str] = mapped_column(Text)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)

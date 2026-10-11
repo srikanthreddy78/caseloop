@@ -50,12 +50,15 @@ Business policy and context:
 """
 
 
-def system_prompt(business: Business) -> str:
+def system_prompt(business: Business, learning: str = "") -> str:
     context = (
         business.context_text.strip()
         or "(No policy text configured. Escalate anything that needs a decision.)"
     )
-    return SYSTEM_CORE.format(business_name=business.name, business_context=context)
+    prompt = SYSTEM_CORE.format(business_name=business.name, business_context=context)
+    if learning.strip():
+        prompt += "\nWhat this business has taught you:\n" + learning.strip() + "\n"
+    return prompt
 
 
 ASSESSMENT_INSTRUCTIONS = """You classify customer support conversations for {business_name}.

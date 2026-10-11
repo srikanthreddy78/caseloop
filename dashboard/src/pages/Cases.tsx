@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { ago, api } from "../api";
 import { StatePill } from "../components/StatePill";
@@ -34,21 +34,31 @@ export function Cases() {
   const [total, setTotal] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
-
-  useEffect(() => {
-    const t = setInterval(() => setAttempt((a) => a + 1), 5000);
-    return () => clearInterval(t);
-  }, []);
+  const loadedQuery = useRef("");
 
   useEffect(() => {
     let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     setError(null);
     const q = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset) });
     if (filter.states) q.set("state", filter.states.join(","));
-    api<{ data: Case[]; meta: { total: number } }>(`/v1/cases?${q}`).then((r) => {
-      if (!cancelled) { setCases(r.data); setTotal(r.meta.total); }
-    }).catch((ex) => { if (!cancelled) setError((ex as Error).message); });
-    return () => { cancelled = true; };
+    const query = q.toString();
+    if (loadedQuery.current !== query) {
+      setCases(null); setTotal(0); loadedQuery.current = query;
+    }
+    const refresh = async () => {
+      try {
+        const r = await api<{ data: Case[]; meta: { total: number } }>(`/v1/cases?${query}`);
+        if (!cancelled) { setCases(r.data); setTotal(r.meta.total); setError(null); }
+      } catch (ex) {
+        if (!cancelled) setError((ex as Error).message);
+      } finally {
+        // Let a slow request finish before scheduling another refresh.
+        if (!cancelled) timer = setTimeout(refresh, 5000);
+      }
+    };
+    void refresh();
+    return () => { cancelled = true; clearTimeout(timer); };
   }, [filter, offset, attempt]);
 
   const goToOffset = (nextOffset: number) => setParams((current) => {

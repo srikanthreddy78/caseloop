@@ -3,6 +3,7 @@ import { useOutletContext } from "react-router-dom";
 import { api } from "../api";
 import type { Business, ShellContext } from "../types";
 import { OrderSources } from "../components/OrderSources";
+import { Lessons } from "../components/Lessons";
 import { Queue } from "../components/Queue";
 import { Team } from "../components/Team";
 
@@ -85,6 +86,7 @@ export function Settings() {
         {error && <p className="text-clay text-sm">{error}</p>}
         <div><button className="btn btn-primary" type="submit">{saved ? "Saved" : "Save changes"}</button></div>
       </form>
+        <div className="border-t border-line pt-6"><Lessons /></div>
         <div className="border-t border-line pt-6"><OrderSources /></div>
         <div className="border-t border-line pt-6"><Queue /></div>
       </div>

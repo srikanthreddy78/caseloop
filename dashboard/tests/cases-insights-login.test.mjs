@@ -88,6 +88,79 @@ test("Cases keeps the selected filter when an older request completes later", as
   assert.doesNotMatch(textOf(component.render()), /old-open/);
 });
 
+test("Cases lets slow requests complete and retains rows while polling", async (t) => {
+  const { api, requests } = queue();
+  const component = page(t, "Cases", api);
+  await component.advanceTimersByTime(15000);
+  component.render();
+  assert.equal(requests.length, 1);
+  requests[0].resolve({ data: [caseData("first")], meta: { total: 1 } });
+  await settle();
+  assert.match(textOf(component.render()), /Case first/);
+  await component.advanceTimersByTime(4999);
+  assert.equal(requests.length, 1);
+  await component.advanceTimersByTime(1);
+  assert.equal(requests.length, 2);
+  assert.match(textOf(component.render()), /Case first/);
+  await component.advanceTimersByTime(15000);
+  component.render();
+  assert.equal(requests.length, 2);
+  requests[1].resolve({ data: [caseData("updated")], meta: { total: 1 } });
+  await settle();
+  assert.match(textOf(component.render()), /Case updated/);
+});
+
+test("An old Cases poll cannot overwrite a newly selected filter", async (t) => {
+  const { api, requests } = queue();
+  const component = page(t, "Cases", api);
+  requests[0].resolve({ data: [caseData("open")], meta: { total: 1 } });
+  await settle();
+  await component.advanceTimersByTime(5000);
+  button(component.render(), "Resolved").props.onClick();
+  component.render();
+  assert.doesNotMatch(textOf(component.render()), /Case open/);
+  requests[2].resolve({ data: [caseData("resolved", "resolved")], meta: { total: 1 } });
+  await settle();
+  requests[1].resolve({ data: [caseData("old-poll")], meta: { total: 1 } });
+  await settle();
+  assert.match(textOf(component.render()), /Case resolved/);
+  assert.doesNotMatch(textOf(component.render()), /old-poll/);
+});
+
+test("Cases polling recovers from a transient error", async (t) => {
+  let requests = 0;
+  const component = page(t, "Cases", async () => {
+    requests++;
+    if (requests === 2) throw new Error("Temporary outage");
+    return { data: [caseData(requests === 1 ? "first" : "recovered")], meta: { total: 1 } };
+  });
+  await settle();
+  await component.advanceTimersByTime(5000);
+  assert.match(textOf(component.render()), /Temporary outage/);
+  await component.advanceTimersByTime(5000);
+  assert.match(textOf(component.render()), /Case recovered/);
+  assert.doesNotMatch(textOf(component.render()), /Temporary outage/);
+  assert.equal(requests, 3);
+});
+
+test("Cases stops polling when unmounted, including after an in-flight load", async (t) => {
+  for (const finishBeforeCleanup of [true, false]) {
+    const { api, requests } = queue();
+    const component = page(t, "Cases", api);
+    if (finishBeforeCleanup) {
+      requests[0].resolve({ data: [caseData("one")], meta: { total: 1 } });
+      await settle();
+    }
+    component.cleanup();
+    if (!finishBeforeCleanup) {
+      requests[0].resolve({ data: [caseData("one")], meta: { total: 1 } });
+      await settle();
+    }
+    await component.advanceTimersByTime(15000);
+    assert.equal(requests.length, 1);
+  }
+});
+
 test("Cases reaches records after the first hundred and resets the page on filter change", async (t) => {
   const paths = [];
   const component = page(t, "Cases", async (path) => {

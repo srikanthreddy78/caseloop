@@ -9,6 +9,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, HTTPException, Query, Response, status
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 from sqlalchemy import func, select
 
 from app.api.deps import BusinessDep, RateLimitApi, ServicesDep, SessionDep
@@ -26,6 +27,13 @@ from app.cases.service import (
 from app.channels.base import ChannelUnavailable, SendResult
 from app.channels.fallback import delivery_channel
 from app.insights.service import generate_insights, latest_snapshot
+from app.learning import (
+    active_lessons,
+    lesson_from_human_escalation,
+    lesson_from_human_reply,
+    lesson_from_human_resolution,
+    record_lesson,
+)
 from app.models import (
     Business,
     Case,
@@ -33,6 +41,7 @@ from app.models import (
     Channel,
     Direction,
     JobKind,
+    Lesson,
     Message,
     RequirementStatus,
     Sender,
@@ -242,6 +251,13 @@ async def human_reply(
     )
     session.add(msg)
     await session.flush()
+    await record_lesson(
+        session,
+        business,
+        kind="human_reply",
+        text=lesson_from_human_reply(case, payload.text),
+        case=case,
+    )
     if error is None:
         _mark_delivered(case, msg, sent, now)
     await record_event(
@@ -403,6 +419,13 @@ async def human_resolve(
     except sm.InvalidTransition as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
     case.resolution = {"type": payload.resolution_type, "notes": payload.notes, "by": "human"}
+    await record_lesson(
+        session,
+        business,
+        kind="human_resolution",
+        text=lesson_from_human_resolution(case, payload.resolution_type, payload.notes),
+        case=case,
+    )
     await cancel_pending_jobs(session, case.id)
     await session.commit()
     await session.refresh(case)
@@ -434,6 +457,13 @@ async def human_escalate(
         "summary": payload.summary_for_human,
         "by": "human",
     }
+    await record_lesson(
+        session,
+        business,
+        kind="human_takeover",
+        text=lesson_from_human_escalation(case, payload.reason, payload.summary_for_human),
+        case=case,
+    )
     await cancel_pending_jobs(session, case.id)
     await session.commit()
     await session.refresh(case)
@@ -500,3 +530,36 @@ async def case_orders(
     result = await services.orders.lookup(session, business, query, now=services.clock.now())
     await session.commit()
     return DataOut(data=result.summary())
+
+
+class LessonOut(BaseModel):
+    id: uuid.UUID
+    kind: str
+    category: str | None
+    text: str
+    case_id: uuid.UUID | None
+    created_at: datetime
+    model_config = {"from_attributes": True}
+
+
+@router.get("/lessons", response_model=DataOut[list[LessonOut]])
+async def list_lessons(business: BusinessDep, session: SessionDep) -> DataOut[list[LessonOut]]:
+    """What the agent has learned from this business's people, newest first."""
+    rows = await active_lessons(session, business.id, limit=100)
+    return DataOut(data=[LessonOut.model_validate(r) for r in rows])
+
+
+@router.delete("/lessons/{lesson_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def forget_lesson(
+    lesson_id: uuid.UUID, business: BusinessDep, session: SessionDep
+) -> Response:
+    lesson = (
+        await session.execute(
+            select(Lesson).where(Lesson.id == lesson_id, Lesson.business_id == business.id)
+        )
+    ).scalar_one_or_none()
+    if lesson is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "lesson not found")
+    lesson.active = False
+    await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

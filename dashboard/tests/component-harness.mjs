@@ -22,7 +22,15 @@ export function loadModule(url, imports, globals = {}) {
 
 export function mount(url, name, { api, context, imports = {}, props = {} } = {}) {
   const slots = [];
-  const timers = new Set();
+  const timers = new Map();
+  let now = 0;
+  let nextTimer = 1;
+  const schedule = (fn, delay = 0, repeat = false, args = []) => {
+    const wait = Math.max(repeat ? 1 : 0, Number(delay) || 0);
+    const id = nextTimer++;
+    timers.set(id, { fn, args, due: now + wait, interval: repeat ? wait : null });
+    return id;
+  };
   let cursor = 0;
   let effects = [];
   const slot = (create) => {
@@ -62,13 +70,10 @@ export function mount(url, name, { api, context, imports = {}, props = {} } = {}
     window: { location: { origin: "http://localhost:5173" } },
     URLSearchParams,
     URL,
-    setTimeout(fn, delay) {
-      const timer = setTimeout(fn, delay);
-      timer.unref();
-      timers.add(timer);
-      return timer;
-    },
-    clearTimeout,
+    setTimeout: (fn, delay, ...args) => schedule(fn, delay, false, args),
+    clearTimeout: (id) => timers.delete(id),
+    setInterval: (fn, delay, ...args) => schedule(fn, delay, true, args),
+    clearInterval: (id) => timers.delete(id),
   });
   return {
     render() {
@@ -84,9 +89,24 @@ export function mount(url, name, { api, context, imports = {}, props = {} } = {}
       for (const state of active) state.cleanup?.();
       for (const state of active) state.cleanup = state.effect();
     },
+    async advanceTimersByTime(ms) {
+      const end = now + ms;
+      let fired = 0;
+      while (true) {
+        const next = [...timers.entries()].filter(([, timer]) => timer.due <= end).sort((a, b) => a[1].due - b[1].due || a[0] - b[0])[0];
+        if (!next) break;
+        if (++fired > 10000) throw new Error("Timer loop did not settle");
+        const [id, timer] = next;
+        now = timer.due;
+        if (timer.interval === null) timers.delete(id); else timer.due += timer.interval;
+        timer.fn(...timer.args);
+        await settle();
+      }
+      now = end;
+    },
     cleanup() {
       for (const state of slots) state.cleanup?.();
-      for (const timer of timers) clearTimeout(timer);
+      timers.clear();
     },
   };
 }

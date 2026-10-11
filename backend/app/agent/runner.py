@@ -21,6 +21,7 @@ from app.cases.service import enqueue_job, load_business, load_case, record_even
 from app.channels.registry import ChannelRegistry
 from app.clock import Clock
 from app.db import SessionFactory
+from app.learning import active_lessons, learning_block, precedents
 from app.models import (
     Business,
     Case,
@@ -212,7 +213,13 @@ async def run_agent_turn(
 
         tools = CaseTools(ctx)
         try:
-            result.provider_meta = await runner.run_turn(ctx, tools, system_prompt(business))
+            learning = learning_block(
+                await active_lessons(session, business.id),
+                await precedents(session, business.id, case.category, exclude_case_id=case.id),
+            )
+            result.provider_meta = await runner.run_turn(
+                ctx, tools, system_prompt(business, learning)
+            )
         except ToolError as exc:
             log.warning("turn hit a tool limit on case %s: %s", case.id, exc)
             await _escalate_system(tools, reason="tool_limit", detail=str(exc))
