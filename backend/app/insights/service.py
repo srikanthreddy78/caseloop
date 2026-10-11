@@ -99,7 +99,7 @@ async def latest_snapshot(session: AsyncSession, business: Business) -> InsightS
     stmt = (
         select(InsightSnapshot)
         .where(InsightSnapshot.business_id == business.id)
-        .order_by(InsightSnapshot.generated_at.desc())
+        .order_by(InsightSnapshot.created_at.desc())
         .limit(1)
     )
     return (await session.execute(stmt)).scalar_one_or_none()
