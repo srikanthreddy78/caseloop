@@ -108,6 +108,10 @@ class TimelineItem(BaseModel):
     meta: dict[str, Any] | None = None
 
 
+# Secrets are never echoed back; sending the mask on PATCH keeps the stored value.
+MASKED = "••••"
+
+
 class BusinessOut(BaseModel):
     id: uuid.UUID
     name: str
@@ -123,7 +127,9 @@ class BusinessOut(BaseModel):
     max_followups: int
     outbound_webhook_url: str | None
     allowed_origins: list[str] = Field(default_factory=list)
+    order_email_senders: list[str] = Field(default_factory=list)
     slack_webhook_url: str | None = None
+    """``MASKED`` when a Slack webhook is configured (the URL itself is a secret)."""
     model_config = {"from_attributes": True}
 
     @model_validator(mode="before")
@@ -133,12 +139,16 @@ class BusinessOut(BaseModel):
         if isinstance(value, dict) or not hasattr(value, "settings"):
             return value
         data = {name: getattr(value, name) for name in cls.model_fields if hasattr(value, name)}
-        data["allowed_origins"] = list((value.settings or {}).get("allowed_origins") or [])
-        data["slack_webhook_url"] = (value.settings or {}).get("slack_webhook_url")
+        settings = value.settings or {}
+        data["allowed_origins"] = list(settings.get("allowed_origins") or [])
+        data["order_email_senders"] = list(settings.get("order_email_senders") or [])
+        data["slack_webhook_url"] = MASKED if settings.get("slack_webhook_url") else None
         return data
 
 
 _ORIGIN_RE = re.compile(r"^https?://[^/\s?#]+$")
+# An address (orders@shopify.com) or a bare domain (amazon.com).
+_SENDER_RE = re.compile(r"^(?:[^@\s]+@)?[a-z0-9-]+(?:\.[a-z0-9-]+)+$")
 
 
 def normalize_origin(origin: str) -> str:
@@ -158,6 +168,37 @@ class BusinessUpdate(BaseModel):
     dial_number_id: str | None = None
     dial_phone_number: str | None = None
     allowed_origins: list[str] | None = Field(default=None, max_length=50)
+    order_email_senders: list[str] | None = Field(default=None, max_length=50)
+
+    @field_validator("slack_webhook_url")
+    @classmethod
+    def _check_slack_url(cls, value: str | None) -> str | None:
+        """Empty clears it, the mask keeps it, anything else must be an https URL."""
+        if value is None:
+            return None
+        value = value.strip()
+        if value in ("", MASKED):
+            return value
+        if not value.startswith("https://") or len(value) <= len("https://"):
+            raise ValueError("slack_webhook_url must be an https:// URL")
+        return value
+
+    @field_validator("order_email_senders")
+    @classmethod
+    def _check_senders(cls, value: list[str] | None) -> list[str] | None:
+        """Lowercase addresses or domains, blanks and duplicates dropped."""
+        if value is None:
+            return None
+        cleaned: list[str] = []
+        for raw in value:
+            sender = raw.strip().lower()
+            if not sender:
+                continue
+            if not _SENDER_RE.match(sender):
+                raise ValueError(f"{raw!r} is not an email address or domain")
+            if sender not in cleaned:
+                cleaned.append(sender)
+        return cleaned
 
     @field_validator("allowed_origins")
     @classmethod

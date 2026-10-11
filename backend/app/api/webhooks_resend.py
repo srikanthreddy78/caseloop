@@ -17,8 +17,9 @@ from app.channels.email import (
     parse_sender,
     strip_quoted_reply,
 )
+from app.forwarded_orders import import_forwarded_orders, sender_allowed
 from app.models import Business, Channel, Message
-from app.orders.email_forward import business_for_forward_address, import_forwarded_email
+from app.orders.email_forward import business_for_forward_address
 from app.webhooks.signatures import InvalidSignature, verify_resend
 
 log = logging.getLogger(__name__)
@@ -61,8 +62,16 @@ async def resend_webhook(
         forward_biz = await business_for_forward_address(session, recipients)
         if forward_biz is not None:
             received = await fetch_received_email(email_id)
+            _, sender = parse_sender(str(received.get("from") or data.get("from") or ""))
+            if not sender_allowed(forward_biz, sender, received.get("authentication")):
+                log.info(
+                    "forwarded order email from %s ignored for %s: not in order_email_senders",
+                    sender,
+                    forward_biz.slug,
+                )
+                return {"status": "ignored", "reason": "sender not in order_email_senders"}
             text = (received.get("text") or "").strip() or html_to_text(received.get("html") or "")
-            n = await import_forwarded_email(
+            n = await import_forwarded_orders(
                 session,
                 forward_biz,
                 text,

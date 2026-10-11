@@ -220,6 +220,14 @@ class Job(TimestampMixin, Base):
             unique=True,
             postgresql_where=text("kind = 'agent_turn' AND status = 'pending'"),
         ),
+        # Recurring jobs (insights, digest) carry no case: one pending run per business and kind.
+        Index(
+            "uq_jobs_single_pending_recurring",
+            "business_id",
+            "kind",
+            unique=True,
+            postgresql_where=text("status = 'pending' AND case_id IS NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = _uuid_col()

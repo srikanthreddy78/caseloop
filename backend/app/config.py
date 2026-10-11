@@ -15,7 +15,9 @@ class Settings(BaseSettings):
         env_prefix="CASELOOP_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
     )
 
-    env: Literal["dev", "test", "prod"] = "dev"
+    # Fails closed: an unset CASELOOP_ENV means prod (no /dev endpoints, no unsigned webhooks).
+    # `make dev` and .env.example set dev explicitly.
+    env: Literal["dev", "test", "prod"] = "prod"
     base_url: str = "http://localhost:8000"
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/caseloop"
     data_dir: Path = Path("./data")

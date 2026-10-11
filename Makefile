@@ -1,4 +1,4 @@
-.PHONY: install test lint format typecheck dev demo demo-live eval eval-live migrate db-create create-business
+.PHONY: install test lint format typecheck dev demo demo-live eval eval-live migrate db-create create-business add-owner
 
 install:
 	cd backend && uv sync --extra dev
@@ -27,10 +27,14 @@ migrate:
 	cd backend && uv run alembic upgrade head
 
 dev:
-	cd backend && uv run uvicorn app.main:app --reload --port 8000
+	cd backend && CASELOOP_ENV=dev uv run uvicorn app.main:app --reload --port 8000
 
 create-business:
 	cd backend && uv run python -m app.cli create-business $(ARGS)
+
+# Give a person owner access to a business's dashboard: ARGS="--slug acme --email you@acme.example"
+add-owner:
+	cd backend && uv run python -m app.cli add-owner $(ARGS)
 
 # Scripted agent + fake channels: no network, no keys.
 demo:

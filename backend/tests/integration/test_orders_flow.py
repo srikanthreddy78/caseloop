@@ -108,19 +108,33 @@ async def test_no_order_system_is_reported(auth_client: AsyncClient) -> None:
 
 
 async def test_forwarded_order_email_is_imported(auth_client: AsyncClient) -> None:
-    resp = await auth_client.post(
-        "/dev/simulate/email",
-        json={
-            "to": "orders@" + BUSINESS_PAYLOAD["inbound_email"].split("@")[1],
-            "from_email": "noreply@shop-platform.co",
-            "subject": "Fwd: Your order #B7001 has shipped",
-            "text": "Order #B7001 shipped 2026-10-01. Tracking 1Z999AA10123456784. Total $59.00",
-        },
+    forward = {
+        "to": "orders@" + BUSINESS_PAYLOAD["inbound_email"].split("@")[1],
+        "from_email": "noreply@shop-platform.co",
+        "subject": "Fwd: Your order #B7001 has shipped",
+        "text": "Order #B7001 shipped 2026-10-01. Tracking 1Z999AA10123456784. Total $59.00",
+    }
+    # Nobody is trusted until the business says who sends its order emails.
+    resp = await auth_client.post("/dev/simulate/email", json=forward)
+    assert resp.status_code == 200 and "ignored" in resp.json()["error"]["message"]
+    assert (await auth_client.get("/v1/orders", params={"q": "B7001"})).json()["data"] == []
+
+    saved = await auth_client.patch(
+        "/v1/businesses/me", json={"order_email_senders": [" Shop-Platform.co ", "x@y.co"]}
     )
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["data"]["order_email_senders"] == ["shop-platform.co", "x@y.co"]
+    resp = await auth_client.post("/dev/simulate/email", json=forward)
     assert resp.status_code == 200, resp.text
     found = await auth_client.get("/v1/orders", params={"q": "B7001"})
     assert found.json()["data"][0]["source_label"] == "Forwarded email"
     assert found.json()["data"][0]["status"] == "shipped"
+    # The agent sees it is lower-trust than a connected system.
+    lookup = await auth_client.post("/v1/orders/sources/test", json={"order_number": "B7001"})
+    assert lookup.json()["data"]["found"][0]["notes"] == "imported from a forwarded email"
+
+    bad = await auth_client.patch("/v1/businesses/me", json={"order_email_senders": ["not valid"]})
+    assert bad.status_code == 422
 
 
 async def test_stored_orders_count_as_a_connected_source_even_without_a_match(

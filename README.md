@@ -50,7 +50,7 @@ facts ("I found order 1234 in Shopify, delivered 12 Sep") and uses delivery date
 | Shopify | Setup → Order sources → shop domain + Admin API token |
 | Their own API or tracking system | Setup → "Your website API": URL pattern with `{order_number}`, optional headers, field mapping. Test it on the Orders page |
 | Only a tracking page on their site | Setup → "Tracking page": page URL pattern; the page is read and extracted |
-| No API at all | Auto-forward order confirmation emails to `orders@<inbound domain>`, or upload a CSV on the Orders page, or `POST /v1/orders` |
+| No API at all | Auto-forward order confirmation emails to `orders@<inbound domain>` (list the store's sending addresses or domains under Orders → "Accept order emails from"; mail from anyone else is ignored), or upload a CSV on the Orders page, or `POST /v1/orders` |
 | Amazon | Setup → Amazon (Selling Partner API credentials); CSV export works today |
 
 ## Run it locally
@@ -72,6 +72,8 @@ Then:
   `http://localhost:8000/dashboard`, and sign in with the `--escalation-email` address (the
   business owner). A single-use link is emailed through Resend; in dev the link is also
   logged and shown on screen, so no mailbox is needed. Owners add teammates under Setup → Team.
+  To give someone owner access from the shell:
+  `make add-owner ARGS="--slug acme --email you@acme.example"`.
 - Chat widget: open `widget/example.html#<widget_public_key>` in a browser.
 - Simulate an inbound email without any provider (dev only):
 
@@ -83,6 +85,9 @@ curl -X POST localhost:8000/dev/simulate/email -H 'Content-Type: application/jso
 
 The scheduler runs inside the server, so the agent replies within seconds. With no
 `OPENAI_API_KEY`, a deterministic scripted agent is used instead.
+
+`CASELOOP_ENV` defaults to `prod` (no `/dev` endpoints, signed webhooks required); `make dev`
+and `.env.example` set `dev` explicitly.
 
 ## Demo
 
@@ -120,6 +125,7 @@ dashboard's `caseloop_session` cookie (people) and return `{"data": …}`; error
 | POST | `/v1/cases` | Open a case from any source |
 | GET | `/v1/cases/{id}` and `/timeline` | Case file and full history |
 | POST | `/v1/cases/{id}/messages` | A person replies on the customer's channel |
+| POST | `/v1/cases/{id}/messages/{message_id}/resend` | Retry a message the channel rejected; hands the case back to the agent if it escalated over the failure |
 | POST | `/v1/cases/{id}/resolve`, `/escalate`, `/run-turn` | Human overrides |
 | GET / POST | `/v1/insights/latest`, `/v1/insights/generate` | Insights report |
 | GET / POST | `/v1/orders`, `/v1/orders/import` | Search stored orders, push JSON rows, import CSV |

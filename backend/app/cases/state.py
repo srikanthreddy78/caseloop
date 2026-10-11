@@ -12,9 +12,12 @@ ALLOWED: dict[CaseState, frozenset[CaseState]] = {
     CaseState.AWAITING_CUSTOMER: frozenset(
         {CaseState.GATHERING, CaseState.RESOLVED, CaseState.ESCALATED, CaseState.ABANDONED}
     ),
-    # Terminal states can only be reopened (or, for escalated, closed by a human).
+    # Terminal states can only be reopened (or, for escalated, closed by a human, or handed back
+    # to the agent once a person resends the message that failed to deliver).
     CaseState.RESOLVED: frozenset({CaseState.GATHERING}),
-    CaseState.ESCALATED: frozenset({CaseState.GATHERING, CaseState.RESOLVED}),
+    CaseState.ESCALATED: frozenset(
+        {CaseState.GATHERING, CaseState.RESOLVED, CaseState.AWAITING_CUSTOMER}
+    ),
     CaseState.ABANDONED: frozenset({CaseState.GATHERING}),
 }
 

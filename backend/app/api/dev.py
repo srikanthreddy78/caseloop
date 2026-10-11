@@ -11,8 +11,9 @@ from app.api.deps import ServicesDep, SessionDep
 from app.auth import generate_api_key, generate_widget_key, hash_api_key, key_prefix
 from app.cases.service import get_or_create_customer, ingest_inbound
 from app.clock import FakeClock
+from app.forwarded_orders import import_forwarded_orders, sender_allowed
 from app.models import Business, Channel, MemberRole, TeamMember
-from app.orders.email_forward import business_for_forward_address, import_forwarded_email
+from app.orders.email_forward import business_for_forward_address
 from app.schemas import (
     BusinessOut,
     CaseDetailOut,
@@ -33,9 +34,10 @@ async def create_business(session: SessionDep, payload: CreateBusinessIn) -> tup
     business = Business(
         name=payload.name,
         slug=payload.slug,
-        inbound_email=str(payload.inbound_email).lower(),
-        from_email=str(payload.from_email or payload.inbound_email).lower(),
-        escalation_email=str(payload.escalation_email).lower(),
+        inbound_email=str(payload.inbound_email).strip().lower(),
+        from_email=str(payload.from_email or payload.inbound_email).strip().lower(),
+        # Lowercased: sign-in looks team members up by the lowercased address.
+        escalation_email=str(payload.escalation_email).strip().lower(),
         api_key_hash=hash_api_key(api_key),
         api_key_prefix=key_prefix(api_key),
         widget_public_key=generate_widget_key(),
@@ -87,7 +89,11 @@ async def simulate_email(
     if business is None:
         forward_biz = await business_for_forward_address(session, [str(payload.to).lower()])
         if forward_biz is not None:
-            n = await import_forwarded_email(
+            if not sender_allowed(forward_biz, str(payload.from_email)):
+                raise HTTPException(
+                    status.HTTP_200_OK, "ignored: sender is not in order_email_senders"
+                )
+            n = await import_forwarded_orders(
                 session,
                 forward_biz,
                 payload.text,

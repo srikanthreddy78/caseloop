@@ -24,6 +24,7 @@ export function CaseDetail() {
   const [c, setCase] = useState<CaseDetailT | null>(null);
   const [timeline, setTimeline] = useState<TimelineItem[]>([]);
   const [reply, setReply] = useState("");
+  const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [showTools, setShowTools] = useState(false);
   const [orders, setOrders] = useState<LookupSummary | null>(null);
@@ -42,8 +43,9 @@ export function CaseDetail() {
   if (!c) return <p className="text-ink-soft">Loading…</p>;
 
   const act = async (path: string, body: unknown) => {
-    setBusy(true);
-    try { await api(path, { method: "POST", body: JSON.stringify(body) }); await load(); }
+    setBusy(true); setError(null);
+    try { await api(path, { method: "POST", body: JSON.stringify(body) }); await load(); return true; }
+    catch (ex) { setError((ex as Error).message); await load(); return false; }
     finally { setBusy(false); }
   };
   const missing = c.requirements.filter((r) => r.status === "missing");
@@ -72,6 +74,12 @@ export function CaseDetail() {
                     <span>{fmtTime(t.at)}</span>
                   </div>
                   <div className="whitespace-pre-wrap text-[15px]">{t.text}</div>
+                  {t.meta?.delivery === "failed" && t.id && (
+                    <div className="mt-2 flex items-center gap-3 text-xs">
+                      <button type="button" className="btn" disabled={busy} onClick={() => act(`/v1/cases/${c.id}/messages/${t.id}/resend`, {})}>Resend</button>
+                      {typeof t.meta.error === "string" && <span className="text-clay">{t.meta.error}</span>}
+                    </div>
+                  )}
                   {t.attachments && t.attachments.length > 0 && <Attachments caseId={c.id} items={t.attachments} />}
                 </li>
               ) : (
@@ -84,7 +92,8 @@ export function CaseDetail() {
           </ol>
           <button className="mt-4 text-xs text-ink-soft hover:text-ink" onClick={() => setShowTools(!showTools)}>{showTools ? "Hide" : "Show"} every agent step</button>
 
-          <form className="mt-8 border-t border-line pt-6" onSubmit={async (e) => { e.preventDefault(); if (!reply.trim()) return; await act(`/v1/cases/${c.id}/messages`, { text: reply }); setReply(""); }}>
+          {error && <p className="mt-4 text-sm text-clay">{error}</p>}
+          <form className="mt-8 border-t border-line pt-6" onSubmit={async (e) => { e.preventDefault(); if (!reply.trim()) return; if (await act(`/v1/cases/${c.id}/messages`, { text: reply })) setReply(""); }}>
             <label className="block text-sm font-medium mb-1" htmlFor="reply">Reply as a person</label>
             <p className="text-sm text-ink-soft mb-2">Sent on the same channel the customer used. The agent keeps working unless you resolve or take the case.</p>
             <textarea id="reply" className="field min-h-24" value={reply} onChange={(e) => setReply(e.target.value)} />

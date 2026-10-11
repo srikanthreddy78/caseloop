@@ -4,15 +4,20 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
+
+from sqlalchemy import select, text
+from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.runner import run_agent_turn
 from app.cases import state as sm
 from app.cases.service import enqueue_job, load_business, load_case, record_event
+from app.db import SessionFactory
 from app.insights.service import generate_insights
 from app.jobs_dial import handle_fetch_call_transcript
-from app.models import JobKind, Sender
+from app.models import Business, Job, JobKind, JobStatus, Sender
 from app.notifications import build_digest, notify_escalation, post_slack_alert
 from app.scheduler import JobContext, Scheduler
 from app.webhooks.outbound import deliver_business_webhook
@@ -91,35 +96,85 @@ DIGEST_EVERY_HOURS = 24
 # Not a JobKind member: Job.kind is a plain string column and this job never touches a case.
 DIGEST_KIND = "digest"
 
+RECURRING: tuple[tuple[str, int], ...] = (
+    (JobKind.INSIGHTS, INSIGHTS_EVERY_HOURS),
+    (DIGEST_KIND, DIGEST_EVERY_HOURS),
+)
+_RECURRING_HOURS = dict(RECURRING)
+
+
+async def book_recurring(
+    session: AsyncSession, business_id: uuid.UUID, kind: str, due_at: datetime
+) -> bool:
+    """Insert the next run of a recurring job unless one is already pending for the business.
+
+    The partial unique index ``uq_jobs_single_pending_recurring`` makes this safe when several
+    processes start at once: the loser's insert is simply dropped.
+    """
+    stmt = (
+        insert(Job)
+        .values(
+            id=uuid.uuid4(),
+            business_id=business_id,
+            case_id=None,
+            kind=kind,
+            payload={"recurring": True},
+            due_at=due_at,
+            status=JobStatus.PENDING,
+            attempts=0,
+        )
+        .on_conflict_do_nothing(
+            index_elements=["business_id", "kind"],
+            index_where=text("status = 'pending' AND case_id IS NULL"),
+        )
+    )
+    result = await session.execute(stmt)
+    return bool(getattr(result, "rowcount", 0))
+
+
+async def _run_recurring(ctx: JobContext, kind: str, work: Any) -> None:
+    """Run one recurring job and always book the next one, even when this run blew up.
+
+    Errors are logged rather than raised: a retry of this run would collide with the run
+    already booked for tomorrow, and the next run is the retry.
+    """
+    now = ctx.clock.now()
+    async with ctx.session_factory() as session:
+        business = await load_business(session, ctx.job.business_id)
+    if business is None:
+        return
+    try:
+        await work(business, now)
+    except Exception:
+        log.exception("%s job for business %s failed; next run is booked", kind, business.id)
+    finally:
+        async with ctx.session_factory() as session:
+            await book_recurring(
+                session, business.id, kind, now + timedelta(hours=_RECURRING_HOURS[kind])
+            )
+            await session.commit()
+
 
 async def handle_insights(ctx: JobContext) -> None:
     """Refresh the business's insights report, then book the next run."""
     s = ctx.services
-    now = ctx.clock.now()
-    async with ctx.session_factory() as session:
-        business = await load_business(session, ctx.job.business_id)
-        if business is None:
-            return
-        await generate_insights(session, business, now=now, generator=s.insights)
-        await enqueue_job(
-            session,
-            business_id=business.id,
-            kind=JobKind.INSIGHTS,
-            due_at=now + timedelta(hours=INSIGHTS_EVERY_HOURS),
-            payload={"recurring": True},
-        )
-        await session.commit()
+
+    async def work(business: Business, now: datetime) -> None:
+        async with ctx.session_factory() as session:
+            business = (await load_business(session, business.id)) or business
+            await generate_insights(session, business, now=now, generator=s.insights)
+            await session.commit()
+
+    await _run_recurring(ctx, JobKind.INSIGHTS, work)
 
 
 async def handle_digest(ctx: JobContext) -> None:
     """Email the business a one-screen summary of what is open, then book tomorrow's."""
     s = ctx.services
-    now = ctx.clock.now()
-    async with ctx.session_factory() as session:
-        business = await load_business(session, ctx.job.business_id)
-        if business is None:
-            return
-        digest = await build_digest(session, business, now=now, base_url=s.settings.base_url)
+
+    async def work(business: Business, now: datetime) -> None:
+        async with ctx.session_factory() as session:
+            digest = await build_digest(session, business, now=now, base_url=s.settings.base_url)
         if digest is not None and s.channels.notifier is not None:
             subject, text = digest
             await s.channels.notifier.send_email(
@@ -128,14 +183,8 @@ async def handle_digest(ctx: JobContext) -> None:
                 text=text,
                 from_email=business.from_email,
             )
-        await enqueue_job(
-            session,
-            business_id=business.id,
-            kind=DIGEST_KIND,
-            due_at=now + timedelta(hours=DIGEST_EVERY_HOURS),
-            payload={"recurring": True},
-        )
-        await session.commit()
+
+    await _run_recurring(ctx, DIGEST_KIND, work)
 
 
 async def handle_deliver_webhook(ctx: JobContext) -> None:
@@ -146,40 +195,16 @@ async def handle_deliver_webhook(ctx: JobContext) -> None:
         await deliver_business_webhook(business, ctx.job.payload, now=ctx.clock.now())
 
 
-RECURRING: tuple[tuple[str, int], ...] = (
-    (JobKind.INSIGHTS, INSIGHTS_EVERY_HOURS),
-    (DIGEST_KIND, DIGEST_EVERY_HOURS),
-)
-
-
-async def ensure_recurring_jobs(session_factory: Any, now: Any) -> int:
+async def ensure_recurring_jobs(session_factory: SessionFactory, now: datetime) -> int:
     """Called at startup: every business gets exactly one pending job per recurring kind."""
-    from sqlalchemy import select
-
-    from app.models import Business, Job, JobStatus
-
     created = 0
     async with session_factory() as session:
         businesses = (await session.execute(select(Business.id))).scalars().all()
         for business_id in businesses:
             for kind, every_hours in RECURRING:
-                pending = await session.execute(
-                    select(Job.id)
-                    .where(
-                        Job.business_id == business_id,
-                        Job.kind == kind,
-                        Job.status == JobStatus.PENDING,
-                    )
-                    .limit(1)
-                )
-                if pending.first() is None:
-                    await enqueue_job(
-                        session,
-                        business_id=business_id,
-                        kind=kind,
-                        due_at=now + timedelta(hours=every_hours),
-                        payload={"recurring": True},
-                    )
+                if await book_recurring(
+                    session, business_id, kind, now + timedelta(hours=every_hours)
+                ):
                     created += 1
         await session.commit()
     return created

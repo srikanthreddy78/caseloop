@@ -1,9 +1,13 @@
 import { useEffect, useState } from "react";
+import { useOutletContext } from "react-router-dom";
 import { api } from "../api";
 import { OrderCard, SourceBadge } from "../components/OrderCard";
-import type { LookupSummary, OrderOut, SourcesInfo } from "../types";
+import type { Business, LookupSummary, OrderOut, ShellContext, SourcesInfo } from "../types";
 
 export function Orders() {
+  const { business, setBusiness } = useOutletContext<ShellContext>();
+  const [senders, setSenders] = useState((business.order_email_senders || []).join("\n"));
+  const [sendersMsg, setSendersMsg] = useState<string | null>(null);
   const [info, setInfo] = useState<SourcesInfo | null>(null);
   const [orders, setOrders] = useState<OrderOut[]>([]);
   const [q, setQ] = useState("");
@@ -29,6 +33,16 @@ export function Orders() {
       setImportMsg(`Imported ${r.data.imported} orders as “${r.data.source_label}”. Columns used: ${Object.entries(r.data.columns_used).map(([k, v]) => `${k} ← ${v}`).join(", ")}.`);
       await load();
     } catch (e) { setImportMsg((e as Error).message); }
+    finally { setBusy(false); }
+  };
+
+  const saveSenders = async () => {
+    setBusy(true); setSendersMsg(null);
+    try {
+      const list = senders.split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
+      const r = await api<{ data: Business }>("/v1/businesses/me", { method: "PATCH", body: JSON.stringify({ order_email_senders: list }) });
+      setBusiness(r.data); setSenders(r.data.order_email_senders.join("\n")); setSendersMsg("Saved");
+    } catch (e) { setSendersMsg((e as Error).message); }
     finally { setBusy(false); }
   };
 
@@ -116,6 +130,13 @@ export function Orders() {
             <p className="text-ink-soft">Auto-forward confirmation and shipping emails from any store to</p>
             <code className="block mt-1 bg-panel border border-line rounded px-2 py-1 break-all">{info.forward_address}</code>
             <p className="text-ink-soft mt-1">Each one becomes a stored order labeled “Forwarded email”.</p>
+            <label className="block font-medium mt-3 mb-1" htmlFor="senders">Accept order emails from</label>
+            <textarea id="senders" className="field font-mono text-xs min-h-20" placeholder={"orders@shopify.com\namazon.com"} value={senders} onChange={(e) => setSenders(e.target.value)} />
+            <p className="text-xs text-ink-soft mt-1">Addresses or domains, one per line. Mail from anyone else is ignored, so nobody can plant orders by guessing the address.</p>
+            <div className="flex items-center gap-3 mt-2">
+              <button type="button" className="btn" disabled={busy} onClick={saveSenders}>Save senders</button>
+              {sendersMsg && <span className="text-xs text-ink-soft">{sendersMsg}</span>}
+            </div>
           </div>
         </aside>
       </div>

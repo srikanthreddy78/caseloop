@@ -13,6 +13,7 @@ from app.models import CaseState
         (CaseState.AWAITING_CUSTOMER, CaseState.ABANDONED),
         (CaseState.RESOLVED, CaseState.GATHERING),
         (CaseState.ESCALATED, CaseState.RESOLVED),
+        (CaseState.ESCALATED, CaseState.AWAITING_CUSTOMER),
         (CaseState.ABANDONED, CaseState.GATHERING),
     ],
 )

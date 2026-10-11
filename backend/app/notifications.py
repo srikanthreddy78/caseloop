@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Protocol
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.cases.service import case_timeline
@@ -17,6 +17,7 @@ log = logging.getLogger(__name__)
 
 SLACK_TIMEOUT_SECONDS = 10
 DIGEST_LONGEST_WAITING = 5
+DIGEST_NEEDS_PERSON_DAYS = 14
 NEEDS_PERSON_STATES = (CaseState.ESCALATED, CaseState.ABANDONED)
 
 
@@ -116,11 +117,21 @@ async def build_digest(
     session: AsyncSession, business: Business, *, now: datetime, base_url: str
 ) -> tuple[str, str] | None:
     """Daily summary, or None when nothing is open and nothing is waiting on a person."""
-    states = [s.value for s in CaseState if s not in TERMINAL_STATES or s in NEEDS_PERSON_STATES]
+    open_states = [s.value for s in CaseState if s not in TERMINAL_STATES]
+    person_states = [s.value for s in NEEDS_PERSON_STATES]
+    # Hand-offs older than the window are stale: either dealt with outside Caseloop or not
+    # going to be, and repeating them daily only buries today's.
+    since = now - timedelta(days=DIGEST_NEEDS_PERSON_DAYS)
     rows = (
         (
             await session.execute(
-                select(Case).where(Case.business_id == business.id, Case.state.in_(states))
+                select(Case).where(
+                    Case.business_id == business.id,
+                    or_(
+                        Case.state.in_(open_states),
+                        and_(Case.state.in_(person_states), Case.closed_at >= since),
+                    ),
+                )
             )
         )
         .scalars()

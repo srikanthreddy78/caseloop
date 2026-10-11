@@ -63,6 +63,7 @@ class TurnContext:
     orders: Any = None  # app.orders.service.OrderService | None
     orders_found: list[dict[str, Any]] = field(default_factory=list)
     messages_sent: int = 0
+    messages_failed: int = 0  # of messages_sent, how many the channel could not deliver
     terminal_tool: str | None = None
     tool_calls: int = 0
     log: list[dict[str, Any]] = field(default_factory=list)
@@ -376,11 +377,15 @@ class CaseTools:
             ids = list(ctx.case.email_thread_message_ids or [])
             ids.append(rfc_id)
             ctx.case.email_thread_message_ids = ids
-        ctx.case.last_agent_message_at = now
         ctx.messages_sent += 1
-        for r in ctx.case.requirements:
-            if r.status == RequirementStatus.MISSING:
-                r.asked_count += 1
+        if delivery_error is None:
+            # Only a delivered message counts as having asked the customer for anything.
+            ctx.case.last_agent_message_at = now
+            for r in ctx.case.requirements:
+                if r.status == RequirementStatus.MISSING:
+                    r.asked_count += 1
+        else:
+            ctx.messages_failed += 1
         await ctx.session.flush()
         ctx.case.messages.append(msg)
         await record_event(
@@ -394,11 +399,12 @@ class CaseTools:
         if delivery_error:
             return json.dumps(
                 {
-                    "ok": True,
+                    "ok": False,
                     "delivered": False,
                     "message_id": str(msg.id),
-                    "note": "Message saved but could not be delivered on this channel right now; the team "
-                    "can resend it from the dashboard. Continue the turn as if it was sent.",
+                    "error": delivery_error,
+                    "instruction": "Do not schedule a follow-up. Call escalate with reason "
+                    "'delivery_failed' so a person can resend.",
                 }
             )
         return json.dumps({"ok": True, "delivered": True, "message_id": str(msg.id)})
@@ -472,6 +478,11 @@ class CaseTools:
         case, biz = ctx.case, ctx.business
         if ctx.messages_sent == 0:
             raise ToolError("send the customer a message before scheduling a follow-up")
+        if ctx.messages_failed == ctx.messages_sent:
+            raise ToolError(
+                "the message was not delivered, so there is nothing to follow up on; "
+                "call escalate with reason 'delivery_failed' so a person can resend it"
+            )
         hours = sm.clamp_followup_hours(hours, biz.followup_schedule_hours, case.followups_sent)
         if ctx.trigger == "followup_due":
             case.followups_sent += 1

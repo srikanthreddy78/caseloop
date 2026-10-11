@@ -227,13 +227,85 @@ async def test_delivery_failure_is_recorded_not_fatal(
         async def send(self, **kwargs: Any) -> None:
             raise ChannelUnavailable("domain not verified")
 
+    working = channels.adapters["email"]
     channels.adapters["email"] = Broken()  # type: ignore[assignment]
     case = await simulate(auth_client, "The lamp arrived smashed.")
     await run_jobs(auth_client)
     case = await get_case(auth_client, case["id"])
-    assert case["state"] == "awaiting_customer", case["state"]
+    # The customer never saw the question, so nothing is asked and nobody is nudged: a person
+    # has to resend it.
+    assert case["state"] == "escalated", case["state"]
+    assert case["escalation"]["reason"] == "delivery_failed"
+    assert "domain not verified" in case["escalation"]["summary"]
+    assert case["last_agent_message_at"] is None
+    assert all(r["asked_count"] == 0 for r in case["requirements"])
     outbound = [m for m in case["messages"] if m["direction"] == "outbound"]
     assert len(outbound) == 1 and outbound[0]["meta"]["delivery"] == "failed"
     assert "domain not verified" in outbound[0]["meta"]["error"]
     timeline = (await auth_client.get(f"/v1/cases/{case['id']}/timeline")).json()["data"]
     assert any(t.get("type") == "delivery_failed" for t in timeline)
+    assert not any(t.get("type") == "followup_scheduled" for t in timeline)
+    tool_results = [t["data"]["result"] for t in timeline if t.get("type") == "tool_called"]
+    assert any('"delivered": false' in r and "delivery_failed" in r for r in tool_results)
+
+    # Still broken: the resend is refused and the message stays flagged.
+    resend = f"/v1/cases/{case['id']}/messages/{outbound[0]['id']}/resend"
+    assert (await auth_client.post(resend)).status_code == 502
+    case = await get_case(auth_client, case["id"])
+    assert case["state"] == "escalated"
+    assert case["messages"][-1]["meta"]["delivery"] == "failed"
+
+    # Channel fixed: the resend delivers, the case goes back to the agent with a follow-up.
+    channels.adapters["email"] = working
+    resp = await auth_client.post(resend)
+    assert resp.status_code == 200, resp.text
+    case = resp.json()["data"]
+    assert case["state"] == "awaiting_customer" and case["escalation"] is None
+    assert case["last_agent_message_at"] is not None
+    assert all(r["asked_count"] == 1 for r in case["requirements"] if r["status"] == "missing")
+    outbound = [m for m in case["messages"] if m["direction"] == "outbound"]
+    assert len(outbound) == 1 and outbound[0]["meta"]["delivery"] == "sent"
+    assert len(email_adapter(channels).sent) == 1
+    timeline = (await auth_client.get(f"/v1/cases/{case['id']}/timeline")).json()["data"]
+    assert any(t.get("type") == "message_sent" and t["data"].get("resent") for t in timeline)
+    assert any(t.get("type") == "followup_scheduled" and t["data"]["hours"] == 24 for t in timeline)
+    assert (await auth_client.post(resend)).status_code == 409  # already delivered
+
+    assert await run_jobs(auth_client, advance_hours=23) == 0
+    assert await run_jobs(auth_client, advance_hours=2) >= 1
+    case = await get_case(auth_client, case["id"])
+    assert case["followups_sent"] == 1 and len(email_adapter(channels).sent) == 2
+
+
+async def test_human_reply_that_fails_is_saved_and_resendable(
+    auth_client: AsyncClient, channels: ChannelRegistry
+) -> None:
+    from app.channels.base import ChannelUnavailable
+
+    class Broken:
+        channel = "email"
+
+        async def send(self, **kwargs: Any) -> None:
+            raise ChannelUnavailable("domain not verified")
+
+    case = await simulate(auth_client, "The lamp arrived smashed.")
+    await run_jobs(auth_client)
+    working = channels.adapters["email"]
+    channels.adapters["email"] = Broken()  # type: ignore[assignment]
+    resp = await auth_client.post(f"/v1/cases/{case['id']}/messages", json={"text": "On it."})
+    assert resp.status_code == 502
+    assert "not delivered" in resp.json()["error"]["message"]
+    case = await get_case(auth_client, case["id"])
+    assert case["state"] == "awaiting_customer"
+    failed = case["messages"][-1]
+    assert failed["sender"] == "human" and failed["meta"]["delivery"] == "failed"
+
+    channels.adapters["email"] = working
+    resp = await auth_client.post(f"/v1/cases/{case['id']}/messages/{failed['id']}/resend")
+    assert resp.status_code == 200, resp.text
+    case = resp.json()["data"]
+    assert case["state"] == "awaiting_customer"  # was never escalated; nothing to reschedule
+    assert case["messages"][-1]["meta"]["delivery"] == "sent"
+    assert email_adapter(channels).sent[-1].text == "On it."
+    bogus = f"/v1/cases/{case['id']}/messages/{case['messages'][0]['id']}/resend"
+    assert (await auth_client.post(bogus)).status_code == 404  # inbound message

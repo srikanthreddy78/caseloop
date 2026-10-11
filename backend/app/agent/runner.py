@@ -194,7 +194,26 @@ async def run_agent_turn(
 
         # Post-conditions: every turn must end in a defined state.
         if ctx.terminal_tool is None and not sm.is_terminal(case.state):
-            if ctx.messages_sent > 0:
+            if ctx.messages_sent > 0 and ctx.messages_failed == ctx.messages_sent:
+                # Nothing reached the customer, so a follow-up would nudge them about a
+                # message they never saw. A person has to resend it from the dashboard.
+                error = next(
+                    (
+                        m.meta.get("error")
+                        for m in reversed(case.messages)
+                        if m.direction == Direction.OUTBOUND and m.meta.get("delivery") == "failed"
+                    ),
+                    None,
+                )
+                await _escalate_system(
+                    tools,
+                    reason="delivery_failed",
+                    detail=str(error or "unknown error"),
+                    summary=f"The reply to the customer could not be delivered on {case.channel}: "
+                    f"{error or 'unknown error'}. Fix the channel, then resend the message from "
+                    "the case page; the agent takes over again once it is delivered.",
+                )
+            elif ctx.messages_sent > 0:
                 hours = sm.next_followup_hours(
                     business.followup_schedule_hours, case.followups_sent
                 )
@@ -250,15 +269,20 @@ async def run_agent_turn(
     return result
 
 
-async def _escalate_system(tools: CaseTools, *, reason: str, detail: str) -> None:
+async def _escalate_system(
+    tools: CaseTools, *, reason: str, detail: str, summary: str | None = None
+) -> None:
     if tools.ctx.terminal_tool is not None:
         return
     await tools.dispatch(
         "escalate",
         {
             "reason": reason,
-            "summary_for_human": f"The agent could not complete this turn ({reason}): {detail}. "
-            "Please review the case timeline and reply to the customer.",
+            "summary_for_human": summary
+            or (
+                f"The agent could not complete this turn ({reason}): {detail}. "
+                "Please review the case timeline and reply to the customer."
+            ),
         },
     )
 

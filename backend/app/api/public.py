@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
+from datetime import datetime, timedelta
 from typing import Annotated, Any
 
 from fastapi import APIRouter, HTTPException, Query, Response, status
@@ -21,11 +23,22 @@ from app.cases.service import (
     record_event,
     transition_case,
 )
-from app.channels.base import ChannelUnavailable
+from app.channels.base import ChannelUnavailable, SendResult
 from app.insights.service import generate_insights, latest_snapshot
-from app.models import Business, Case, CaseState, Direction, JobKind, Message, Sender
+from app.models import (
+    Business,
+    Case,
+    CaseState,
+    Channel,
+    Direction,
+    JobKind,
+    Message,
+    RequirementStatus,
+    Sender,
+)
 from app.orders.base import OrderQuery
 from app.schemas import (
+    MASKED,
     BusinessOut,
     BusinessUpdate,
     CaseDetailOut,
@@ -41,6 +54,7 @@ from app.schemas import (
     TimelineItem,
 )
 
+log = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1", tags=["public"], dependencies=[RateLimitApi])
 
 
@@ -65,8 +79,14 @@ async def update_me(
     payload: BusinessUpdate, business: BusinessDep, session: SessionDep
 ) -> DataOut[BusinessOut]:
     changes = payload.model_dump(exclude_unset=True)
+    if changes.get("slack_webhook_url") == MASKED:
+        changes.pop("slack_webhook_url")  # the masked value echoed back: keep what is stored
     # These live in the settings JSON; reassign the dict so SQLAlchemy sees the change.
-    for key, empty in (("allowed_origins", []), ("slack_webhook_url", None)):
+    for key, empty in (
+        ("allowed_origins", []),
+        ("order_email_senders", []),
+        ("slack_webhook_url", None),
+    ):
         if key in changes:
             business.settings = {**(business.settings or {}), key: changes.pop(key) or empty}
     for field, value in changes.items():
@@ -200,15 +220,14 @@ async def human_reply(
     session: SessionDep,
     services: ServicesDep,
 ) -> DataOut[CaseDetailOut]:
-    """A person at the business replies to the customer on the case's channel."""
+    """A person at the business replies to the customer on the case's channel.
+
+    A message the channel rejects is still saved (flagged not delivered) so it can be resent
+    from the case page; the request then fails with 502 so the sender knows.
+    """
     case = await _case_or_404(session, business, case_id)
-    try:
-        adapter = services.channels.get(case.channel)
-    except ChannelUnavailable as exc:
-        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
-    sent = await adapter.send(
-        business=business, case=case, customer=case.customer, text=payload.text
-    )
+    now = services.clock.now()
+    sent, error = await _deliver(services, business, case, payload.text)
     msg = Message(
         case_id=case.id,
         direction=Direction.OUTBOUND,
@@ -217,21 +236,137 @@ async def human_reply(
         body_text=payload.text,
         provider_message_id=sent.provider_message_id,
         provider_thread_ids=sent.thread_ids or {},
+        meta={"delivery": "failed", "error": error} if error else {"delivery": "sent"},
     )
     session.add(msg)
-    case.last_agent_message_at = services.clock.now()
     await session.flush()
+    if error is None:
+        _mark_delivered(case, msg, sent, now)
+    await record_event(
+        session,
+        business_id=business.id,
+        case_id=case.id,
+        type="delivery_failed" if error else "message_sent",
+        actor=Sender.HUMAN,
+        data={"message_id": str(msg.id), "channel": case.channel, "error": error},
+    )
+    await session.commit()
+    if error:
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            f"the message was saved but not delivered: {error}. Resend it once the channel works.",
+        )
+    await session.refresh(case)
+    return DataOut(data=CaseDetailOut.model_validate(case))
+
+
+@router.post("/cases/{case_id}/messages/{message_id}/resend", response_model=DataOut[CaseDetailOut])
+async def resend_message(
+    case_id: uuid.UUID,
+    message_id: uuid.UUID,
+    business: BusinessDep,
+    session: SessionDep,
+    services: ServicesDep,
+) -> DataOut[CaseDetailOut]:
+    """Retry a stored outbound message the channel rejected earlier.
+
+    On success the message is marked sent and, if the agent had handed the case over because of
+    the failure, the case goes back to waiting on the customer with a fresh follow-up.
+    """
+    case = await _case_or_404(session, business, case_id)
+    msg = next((m for m in case.messages if m.id == message_id), None)
+    if msg is None or msg.direction != Direction.OUTBOUND:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "message not found")
+    if (msg.meta or {}).get("delivery") != "failed":
+        raise HTTPException(status.HTTP_409_CONFLICT, "message was already delivered")
+    now = services.clock.now()
+    sent, error = await _deliver(services, business, case, msg.body_text)
+    if error:
+        msg.meta = {**msg.meta, "error": error, "last_attempt_at": now.isoformat()}
+        await record_event(
+            session,
+            business_id=business.id,
+            case_id=case.id,
+            type="delivery_failed",
+            actor=Sender.HUMAN,
+            data={"message_id": str(msg.id), "channel": case.channel, "error": error},
+        )
+        await session.commit()
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"still not delivered: {error}")
+    msg.provider_message_id = sent.provider_message_id
+    msg.provider_thread_ids = sent.thread_ids or {}
+    msg.meta = {"delivery": "sent", "resent_at": now.isoformat()}
+    _mark_delivered(case, msg, sent, now)
     await record_event(
         session,
         business_id=business.id,
         case_id=case.id,
         type="message_sent",
         actor=Sender.HUMAN,
-        data={"message_id": str(msg.id), "channel": case.channel},
+        data={"message_id": str(msg.id), "channel": case.channel, "resent": True},
     )
+    if (
+        case.state == CaseState.ESCALATED
+        and (case.escalation or {}).get("reason") == "delivery_failed"
+    ):
+        await transition_case(
+            session,
+            case,
+            CaseState.AWAITING_CUSTOMER,
+            actor=Sender.HUMAN,
+            now=now,
+            data={"reason": "message_resent"},
+        )
+        case.escalation = None
+        await cancel_pending_jobs(session, case.id)
+        hours = sm.next_followup_hours(business.followup_schedule_hours, case.followups_sent)
+        due = now + timedelta(hours=hours)
+        await enqueue_job(
+            session,
+            business_id=business.id,
+            kind=JobKind.FOLLOWUP,
+            case_id=case.id,
+            due_at=due,
+            payload={"reason": "default policy after resend"},
+        )
+        await record_event(
+            session,
+            business_id=business.id,
+            case_id=case.id,
+            type="followup_scheduled",
+            actor=Sender.HUMAN,
+            data={"hours": hours, "due_at": due.isoformat(), "reason": "message resent"},
+        )
     await session.commit()
     await session.refresh(case)
     return DataOut(data=CaseDetailOut.model_validate(case))
+
+
+async def _deliver(
+    services: Any, business: Business, case: Case, text: str
+) -> tuple[SendResult, str | None]:
+    """Send on the case's channel; failures come back as an error string, never raised."""
+    try:
+        adapter = services.channels.get(case.channel)
+        result = await adapter.send(business=business, case=case, customer=case.customer, text=text)
+    except ChannelUnavailable as exc:
+        return SendResult(), str(exc)
+    except Exception as exc:
+        log.exception("delivery failed on case %s via %s", case.id, case.channel)
+        return SendResult(), f"{type(exc).__name__}: {str(exc)[:300]}"
+    return result, None
+
+
+def _mark_delivered(case: Case, msg: Message, sent: SendResult, now: datetime) -> None:
+    """What a delivered outbound message changes on the case, mirroring the agent's tool."""
+    rfc_id = (sent.thread_ids or {}).get("rfc_message_id")
+    if case.channel == Channel.EMAIL and rfc_id:
+        case.email_thread_message_ids = [*(case.email_thread_message_ids or []), rfc_id]
+    case.last_agent_message_at = now
+    if msg.sender == Sender.AGENT:
+        for r in case.requirements:
+            if r.status == RequirementStatus.MISSING:
+                r.asked_count += 1
 
 
 @router.post("/cases/{case_id}/resolve", response_model=DataOut[CaseDetailOut])

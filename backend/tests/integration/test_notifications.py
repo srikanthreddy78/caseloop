@@ -5,7 +5,7 @@ import respx
 from app.clock import FakeClock
 from app.container import Services
 from app.jobs import DIGEST_KIND, ensure_recurring_jobs
-from app.models import Job, JobStatus
+from app.models import Business, Job, JobStatus
 from app.notifications import FakeNotifier
 from httpx import AsyncClient
 from sqlalchemy import select
@@ -16,13 +16,26 @@ from tests.integration.test_email_flow import get_case, run_jobs, simulate
 SLACK_URL = "https://hooks.slack.com/services/T000/B000/secret"
 
 
-async def test_slack_url_round_trips_through_business_settings(auth_client: AsyncClient) -> None:
+async def test_slack_url_round_trips_through_business_settings(
+    auth_client: AsyncClient, services: Services
+) -> None:
     me = await auth_client.get("/v1/businesses/me")
     assert me.json()["data"]["slack_webhook_url"] is None
 
     patched = await auth_client.patch("/v1/businesses/me", json={"slack_webhook_url": SLACK_URL})
     assert patched.status_code == 200, patched.text
-    assert patched.json()["data"]["slack_webhook_url"] == SLACK_URL
+    # The URL is a secret: only a mask comes back, and the mask on PATCH keeps what is stored.
+    assert patched.json()["data"]["slack_webhook_url"] == "••••"
+    kept = await auth_client.patch("/v1/businesses/me", json={"slack_webhook_url": "••••"})
+    assert kept.json()["data"]["slack_webhook_url"] == "••••"
+    async with services.session_factory() as session:
+        stored = (await session.execute(select(Business.settings))).scalar_one()
+        assert stored["slack_webhook_url"] == SLACK_URL
+
+    bad = await auth_client.patch(
+        "/v1/businesses/me", json={"slack_webhook_url": "http://hooks.slack.com/x"}
+    )
+    assert bad.status_code == 422
 
     # Other fields still update, and clearing the URL removes it.
     patched = await auth_client.patch(
