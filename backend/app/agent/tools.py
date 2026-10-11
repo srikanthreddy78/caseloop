@@ -11,6 +11,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.requirements import canonical_key
 from app.cases import state as sm
 from app.cases.service import cancel_pending_jobs, enqueue_job, record_event, transition_case
 from app.channels.base import ChannelUnavailable, SendResult
@@ -301,7 +302,7 @@ class CaseTools:
         by_key = {r.key: r for r in case.requirements}
         changed: list[str] = []
         for upd in updates:
-            key = str(upd.get("key", "")).strip()
+            key = canonical_key(str(upd.get("key", "")))
             status = str(upd.get("status", "")).strip()
             value = upd.get("value")
             req = by_key.get(key)
@@ -321,7 +322,7 @@ class CaseTools:
         return json.dumps({"updated": changed, "missing": _missing_keys(case)})
 
     async def tool_add_requirement(self, key: str, label: str, why_needed: str) -> str:
-        key = re.sub(r"[^a-z0-9_]", "_", key.strip().lower())[:64]
+        key = canonical_key(key)
         if not key:
             raise ToolError("key is required")
         case = self.ctx.case

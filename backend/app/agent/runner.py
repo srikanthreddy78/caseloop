@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.prompts import system_prompt
+from app.agent.requirements import CANONICAL_LABELS, canonical_key
 from app.agent.schemas import CaseAssessment
 from app.agent.tools import CaseTools, ToolError, TurnContext, case_snapshot
 from app.cases import state as sm
@@ -71,12 +72,11 @@ async def apply_assessment(session: AsyncSession, case: Case, assessment: CaseAs
     case.remedy_requested = assessment.remedy_requested[:500]
     by_key = {r.key: r for r in case.requirements}
     for spec in assessment.required:
-        key = spec.key.strip().lower()[:64]
+        key = canonical_key(spec.key)
         if not key or key in by_key:
             continue
-        req = Requirement(
-            case_id=case.id, key=key, label=spec.label[:200], why_needed=spec.why_needed
-        )
+        label = CANONICAL_LABELS.get(key, spec.label[:200])
+        req = Requirement(case_id=case.id, key=key, label=label, why_needed=spec.why_needed)
         session.add(req)
         case.requirements.append(req)
         by_key[key] = req
@@ -84,7 +84,7 @@ async def apply_assessment(session: AsyncSession, case: Case, assessment: CaseAs
         (m for m in reversed(case.messages) if m.direction == Direction.INBOUND), None
     )
     for item in assessment.extracted:
-        found = by_key.get(item.key.strip().lower())
+        found = by_key.get(canonical_key(item.key))
         if found is None or not item.value.strip():
             continue
         found.status = RequirementStatus.PROVIDED

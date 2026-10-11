@@ -47,9 +47,9 @@ def system_prompt(business: Business) -> str:
 
 ASSESSMENT_INSTRUCTIONS = """You classify customer support conversations for {business_name}.
 Read the conversation and produce the assessment. List as `required` only the items the business
-genuinely needs to resolve this specific case (for example order_number for anything about an order,
-photos for damage claims, shipping_address for replacements, preferred_remedy when policy offers a
-choice). Put values already present in the conversation into `extracted` using the same keys.
+genuinely needs to resolve this specific case. Use these keys when they apply: order_number,
+photos, shipping_address, delivery_date, tracking_number, preferred_remedy, duplicate_charge_details;
+invent a snake_case key only for something not covered. Put values already present in the conversation into `extracted` using the same keys.
 
 Business policy and context:
 {business_context}
