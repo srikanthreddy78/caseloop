@@ -39,3 +39,57 @@ async def test_unknown_number_is_ignored(services: Services, business: dict[str,
         {"type": "message.received", "data": {"to": "+10000000000", "from": "+1", "body": "hi"}}
     )
     assert out["status"] == "ignored"
+
+
+async def test_carrier_rejection_flags_the_reply_as_undelivered(
+    auth_client: AsyncClient, services: Services, business: dict[str, Any], channels: Any
+) -> None:
+    from tests.integration.test_email_flow import run_jobs
+
+    listener = DialEventListener(services)
+    await listener.handle(
+        {
+            "type": "message.received",
+            "data": {
+                "messageId": "msg_in_2",
+                "from": "+15550007777",
+                "to": BUSINESS_PAYLOAD["dial_phone_number"],
+                "channel": "sms",
+                "body": "lamp cracked",
+                "media": [],
+            },
+        }
+    )
+    await run_jobs(auth_client)
+    case_id = (await auth_client.get("/v1/cases")).json()["data"][0]["id"]
+    detail = (await auth_client.get(f"/v1/cases/{case_id}")).json()["data"]
+    outbound = next(m for m in detail["messages"] if m["direction"] == "outbound")
+    provider_id = channels.adapters["sms"].sent[-1]  # FakeAdapter record
+    assert outbound["meta"]["delivery"] == "sent"
+    # Dial reports the carrier rejection later, keyed by the provider message id.
+    async with services.session_factory() as session:
+        from app.models import Message
+        from sqlalchemy import select
+
+        row = (
+            await session.execute(select(Message).where(Message.id == outbound["id"]))
+        ).scalar_one()
+        provider_message_id = row.provider_message_id
+    out = await listener.handle(
+        {
+            "type": "message.status_changed",
+            "data": {
+                "messageId": provider_message_id,
+                "changed": "delivery",
+                "deliveryState": "undelivered",
+                "deliveryError": "sender isn't registered for A2P/10DLC messaging",
+            },
+        }
+    )
+    assert out == {"status": "accepted", "delivery": "failed"}
+    detail = (await auth_client.get(f"/v1/cases/{case_id}")).json()["data"]
+    outbound = next(m for m in detail["messages"] if m["direction"] == "outbound")
+    assert outbound["meta"]["delivery"] == "failed" and "10DLC" in outbound["meta"]["error"]
+    timeline = (await auth_client.get(f"/v1/cases/{case_id}/timeline")).json()["data"]
+    assert any(t.get("type") == "delivery_failed" for t in timeline)
+    del provider_id

@@ -16,11 +16,11 @@ from app.cases.service import (
     ingest_inbound,
     record_event,
 )
-from app.models import Business, Channel, JobKind, Message, Sender
+from app.models import Business, Case, Channel, JobKind, Message, Sender
 
 log = logging.getLogger(__name__)
 
-HANDLED_EVENTS = ("message.received", "call.ended", "call.transcribed")
+HANDLED_EVENTS = ("message.received", "message.status_changed", "call.ended", "call.transcribed")
 
 
 async def process_dial_event(
@@ -113,7 +113,55 @@ async def process_dial_event(
         await session.commit()
         return {"status": "accepted"}
 
+    if kind == "message.status_changed":
+        return await _apply_delivery_status(session, data)
+
     return {"status": "ignored", "type": kind}
+
+
+async def _apply_delivery_status(session: AsyncSession, data: dict[str, Any]) -> dict[str, str]:
+    """Carrier outcomes arrive after the send: flag undelivered texts on the stored message."""
+    if data.get("changed", "delivery") != "delivery":
+        return {"status": "ignored", "reason": "not a delivery update"}
+    message_id = data.get("messageId")
+    state = str(data.get("deliveryState") or "")
+    if not message_id or state not in ("delivered", "undelivered", "failed"):
+        return {"status": "ignored", "reason": "no delivery outcome"}
+    message = (
+        await session.execute(select(Message).where(Message.provider_message_id == message_id))
+    ).scalar_one_or_none()
+    if message is None:
+        return {"status": "ignored", "reason": "unknown message"}
+    case = await session.get(Case, message.case_id)
+    if case is None:
+        return {"status": "ignored", "reason": "unknown case"}
+    meta = dict(message.meta or {})
+    if state == "delivered":
+        meta.update({"delivery": "sent", "delivery_state": state})
+        meta.pop("error", None)
+    else:
+        meta.update(
+            {
+                "delivery": "failed",
+                "delivery_state": state,
+                "error": data.get("deliveryError") or state,
+            }
+        )
+    message.meta = meta
+    await record_event(
+        session,
+        business_id=case.business_id,
+        case_id=message.case_id,
+        type="delivery_failed" if state != "delivered" else "delivery_confirmed",
+        actor=Sender.SYSTEM,
+        data={
+            "message_id": str(message.id),
+            "channel": message.channel,
+            "error": meta.get("error"),
+        },
+    )
+    await session.commit()
+    return {"status": "accepted", "delivery": meta["delivery"]}
 
 
 async def _business_for_number(session: AsyncSession, number: str | None) -> Business | None:
