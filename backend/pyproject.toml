@@ -19,6 +19,7 @@ dependencies = [
   "resend>=2.49,<3",
   "svix>=2.8,<3",
   "dial-sdk>=0.40,<1",
+  "python-multipart>=0.0.20,<1",
 ]
 
 [project.optional-dependencies]
