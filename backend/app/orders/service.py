@@ -24,7 +24,7 @@ from app.orders.providers import (
     ShopifyProvider,
     TrackingPageProvider,
 )
-from app.orders.store import row_to_record, search_orders, upsert_orders
+from app.orders.store import row_to_record, search_orders, source_counts, upsert_orders
 
 log = logging.getLogger(__name__)
 
@@ -94,12 +94,12 @@ class OrderService:
             rec = row_to_record(row)
             seen.add((rec.source, rec.source_order_id))
             result.orders.append(rec)
-        has_stored = any(
-            str(c.get("type")) in STORED_TYPES
-            for c in business.settings.get("order_sources", []) or []
-        ) or bool(stored_sources & set(STORED_TYPES))
-        if has_stored:
-            result.sources_checked.extend(sorted(stored_sources & set(STORED_TYPES)) or ["csv"])
+        # Stored orders (CSV, API push, forwarded email) count as a connected source whenever the
+        # business has any of them, even if this particular query matched nothing.
+        existing = await source_counts(session, business.id)
+        stored_kinds = sorted((set(existing) | stored_sources) & set(STORED_TYPES))
+        if stored_kinds:
+            result.sources_checked.extend(stored_kinds)
         for provider in self.providers_for(business):
             if isinstance(provider, ProviderNotConfigured):
                 result.errors.append({"source": "unconfigured", "error": str(provider)})

@@ -121,3 +121,16 @@ async def test_forwarded_order_email_is_imported(auth_client: AsyncClient) -> No
     found = await auth_client.get("/v1/orders", params={"q": "B7001"})
     assert found.json()["data"][0]["source_label"] == "Forwarded email"
     assert found.json()["data"][0]["status"] == "shipped"
+
+
+async def test_stored_orders_count_as_a_connected_source_even_without_a_match(
+    auth_client: AsyncClient,
+) -> None:
+    await auth_client.post("/v1/orders/import", json={"csv": CSV})
+    test = await auth_client.post(
+        "/v1/orders/sources/test", json={"order_number": "does-not-exist"}
+    )
+    data = test.json()["data"]
+    assert data["found"] == []
+    assert data["no_order_system_connected"] is False
+    assert "CSV import" in data["sources_checked"]
