@@ -18,6 +18,7 @@ from app.channels.registry import ChannelRegistry
 from app.clock import FakeClock
 from app.config import Settings
 from app.container import build_agent, build_services
+from app.db import scratch_database, sibling_database_url
 from app.main import create_app
 from app.notifications import FakeNotifier
 from httpx import ASGITransport, AsyncClient
@@ -37,6 +38,8 @@ async def main(live: bool) -> int:
     settings = Settings(
         env="dev", scheduler_enabled=False, agent_runner="openai" if live else "scripted"
     )
+    # Never the configured database: a fake clock would fire real businesses' follow-ups.
+    settings.database_url = sibling_database_url(settings.database_url, "scratch")
     clock = FakeClock()
     channels = ChannelRegistry.all_fake()
     notifier = FakeNotifier()
@@ -44,14 +47,20 @@ async def main(live: bool) -> int:
         print("OPENAI_API_KEY is not set; cannot run --live", file=sys.stderr)
         return 2
     runner, assessor = build_agent(settings)
-    services = build_services(
-        settings,
-        clock=clock,
-        channels=channels,
-        notifier=notifier,
-        runner=runner,
-        assessor=assessor,
-    )
+    async with scratch_database(settings.database_url) as engine:
+        services = build_services(
+            settings,
+            engine=engine,
+            clock=clock,
+            channels=channels,
+            notifier=notifier,
+            runner=runner,
+            assessor=assessor,
+        )
+        return await run_demo(services, channels, notifier)
+
+
+async def run_demo(services: Any, channels: ChannelRegistry, notifier: FakeNotifier) -> int:
     app = create_app(services)
     app.state.services = services
     email = channels.adapters["email"]
@@ -89,7 +98,9 @@ async def main(live: bool) -> int:
             return resp.json()["data"]
 
         async def run(advance_hours: float = 0) -> None:
-            resp = await client.post("/dev/run-jobs", json={"advance_hours": advance_hours})
+            resp = await client.post(
+                "/dev/run-jobs", json={"advance_hours": advance_hours, "business_id": biz["id"]}
+            )
             resp.raise_for_status()
 
         async def show(case_id: str) -> dict[str, Any]:
@@ -133,7 +144,6 @@ async def main(live: bool) -> int:
             ),
         )
         say("Escalation emails sent to the business", str(len(notifier.sent)))
-    await services.engine.dispose()
     return 0
 
 
@@ -141,4 +151,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--live", action="store_true", help="use the real OpenAI model")
     args = parser.parse_args()
-    sys.exit(asyncio.run(main(args.live)))
+    try:
+        sys.exit(asyncio.run(main(args.live)))
+    except RuntimeError as exc:  # scratch database missing or not empty
+        sys.exit(f"demo: {exc}")

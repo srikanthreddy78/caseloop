@@ -5,8 +5,10 @@ uv run python scripts/eval.py --live           # real OpenAI runner drives the t
 uv run python scripts/eval.py --min-pass 0.8   # exit 1 when the pass rate is below this
 uv run python scripts/eval.py --only refund    # run the cases whose name contains this
 
-Every case gets a fresh business, its stored orders, and the scripted customer messages; the
-case is then checked against the expectations in the YAML and the business is deleted again.
+Runs against `<database>_scratch` (never the configured database: a fake clock would fire real
+businesses' follow-ups), which must be empty and is emptied again at the end. Every case gets a
+fresh business, its stored orders, and the scripted customer messages, then is checked against
+the expectations in the YAML.
 """
 
 from __future__ import annotations
@@ -26,11 +28,11 @@ from app.channels.registry import ChannelRegistry
 from app.clock import FakeClock
 from app.config import Settings
 from app.container import build_agent, build_services
+from app.db import scratch_database, sibling_database_url
 from app.main import create_app
-from app.models import Business, CaseState
+from app.models import CaseState
 from app.notifications import FakeNotifier
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import delete
 
 CASES_FILE = Path(__file__).resolve().parents[1] / "evals" / "cases.yaml"
 DEFAULT_MIN_PASS = 0.6  # the scripted runner's floor; `make eval-live` asks for 0.8
@@ -118,9 +120,8 @@ def order_rows(orders: list[dict[str, Any]], now: datetime) -> list[dict[str, An
 
 
 class Harness:
-    def __init__(self, client: AsyncClient, services: Any, clock: FakeClock) -> None:
+    def __init__(self, client: AsyncClient, clock: FakeClock) -> None:
         self.client = client
-        self.services = services
         self.clock = clock
 
     async def run_case(self, case: dict[str, Any], default_policy: str) -> Outcome:
@@ -139,7 +140,6 @@ class Harness:
             outcome = judge(case, detail)
         finally:
             self.client.headers.pop("Authorization", None)
-            await self._delete_business(business["id"])
         outcome.seconds = time.perf_counter() - started
         return outcome
 
@@ -160,18 +160,13 @@ class Harness:
         resp.raise_for_status()
         return resp.json()["data"]
 
-    async def _delete_business(self, business_id: str) -> None:
-        async with self.services.session_factory() as session:
-            await session.execute(delete(Business).where(Business.id == uuid.UUID(business_id)))
-            await session.commit()
-
     async def _play(self, case: dict[str, Any], business: dict[str, Any]) -> str:
         customer = case["customer"]
         case_id: str | None = None
         for step in case["steps"]:
             hours = float(step.get("advance_hours") or 0)
             if hours:
-                await self._run_jobs(hours)
+                await self._run_jobs(business, hours)
             if not step.get("text"):
                 continue
             if case.get("channel") == "sms":
@@ -197,12 +192,14 @@ class Harness:
                 )
             resp.raise_for_status()
             case_id = resp.json()["data"]["id"]
-            await self._run_jobs(0)
+            await self._run_jobs(business, 0)
         assert case_id is not None, "a case needs at least one customer message"
         return case_id
 
-    async def _run_jobs(self, advance_hours: float) -> None:
-        resp = await self.client.post("/dev/run-jobs", json={"advance_hours": advance_hours})
+    async def _run_jobs(self, business: dict[str, Any], advance_hours: float) -> None:
+        resp = await self.client.post(
+            "/dev/run-jobs", json={"advance_hours": advance_hours, "business_id": business["id"]}
+        )
         resp.raise_for_status()
 
 
@@ -252,32 +249,33 @@ async def main(args: argparse.Namespace) -> int:
     settings = Settings(
         env="dev", scheduler_enabled=False, agent_runner="openai" if args.live else "scripted"
     )
+    settings.database_url = sibling_database_url(settings.database_url, "scratch")
     if args.live and not settings.openai_api_key:
         print("OPENAI_API_KEY is not set; cannot run --live", file=sys.stderr)
         return 2
     runner, assessor = build_agent(settings)
     # Real "now" so delivery windows line up with the message timestamps a live model sees.
     clock = FakeClock(datetime.now(UTC).replace(microsecond=0))
-    services = build_services(
-        settings,
-        clock=clock,
-        channels=ChannelRegistry.all_fake(),
-        notifier=FakeNotifier(),
-        runner=runner,
-        assessor=assessor,
-    )
-    app = create_app(services)
-    app.state.services = services
     outcomes: list[Outcome] = []
-    try:
+    async with scratch_database(settings.database_url) as engine:
+        services = build_services(
+            settings,
+            engine=engine,
+            clock=clock,
+            channels=ChannelRegistry.all_fake(),
+            notifier=FakeNotifier(),
+            runner=runner,
+            assessor=assessor,
+        )
+        app = create_app(services)
+        app.state.services = services
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://eval") as client:
-            harness = Harness(client, services, clock)
+            harness = Harness(client, clock)
             for case in cases:
                 outcome = await harness.run_case(case, policy)
                 outcomes.append(outcome)
-                print(f"{'PASS' if outcome.passed else 'FAIL'}  {outcome.name}", flush=True)
-    finally:
-        await services.engine.dispose()
+                mark = "PASS" if outcome.passed else "FAIL"
+                print(f"{mark}  {outcome.name}  {'; '.join(outcome.problems)}", flush=True)
     rate = print_report(outcomes, services.runner.name)
     if rate < args.min_pass:
         print(f"below the required pass rate of {args.min_pass:.0%}", file=sys.stderr)
@@ -295,4 +293,7 @@ if __name__ == "__main__":
         help=f"exit 1 below this pass rate (default {DEFAULT_MIN_PASS})",
     )
     parser.add_argument("--only", help="run only cases whose name contains this")
-    sys.exit(asyncio.run(main(parser.parse_args())))
+    try:
+        sys.exit(asyncio.run(main(parser.parse_args())))
+    except RuntimeError as exc:  # scratch database missing or not empty
+        sys.exit(f"eval: {exc}")

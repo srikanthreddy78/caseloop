@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import traceback
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import timedelta
@@ -45,15 +46,14 @@ class Scheduler:
     def register(self, kind: str, handler: Handler) -> None:
         self.handlers[kind] = handler
 
-    async def _claim_due(self, session: AsyncSession, limit: int) -> list[Job]:
+    async def _claim_due(
+        self, session: AsyncSession, limit: int, business_id: uuid.UUID | None
+    ) -> list[Job]:
         now = self.clock.now()
-        stmt = (
-            select(Job)
-            .where(Job.status == JobStatus.PENDING, Job.due_at <= now)
-            .order_by(Job.due_at)
-            .limit(limit)
-            .with_for_update(skip_locked=True)
-        )
+        stmt = select(Job).where(Job.status == JobStatus.PENDING, Job.due_at <= now)
+        if business_id is not None:
+            stmt = stmt.where(Job.business_id == business_id)
+        stmt = stmt.order_by(Job.due_at).limit(limit).with_for_update(skip_locked=True)
         jobs = list((await session.execute(stmt)).scalars().all())
         for job in jobs:
             job.status = JobStatus.RUNNING
@@ -75,13 +75,13 @@ class Scheduler:
         await session.commit()
         return int(getattr(result, "rowcount", 0) or 0)
 
-    async def run_due_jobs(self, limit: int = 10) -> int:
-        """Run every due job once. Returns how many ran. Safe to call from tests and the demo."""
+    async def run_due_jobs(self, limit: int = 10, business_id: uuid.UUID | None = None) -> int:
+        """Run every due job once (only one business's with business_id). Returns how many ran."""
         async with self.session_factory() as session:
             reclaimed = await self.reclaim_stale(session)
             if reclaimed:
                 log.warning("reclaimed %d stale running job(s)", reclaimed)
-            jobs = await self._claim_due(session, limit)
+            jobs = await self._claim_due(session, limit, business_id)
         for job in jobs:
             await self._run_one(job)
         return len(jobs)

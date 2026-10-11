@@ -21,6 +21,7 @@ typecheck:
 db-create:
 	psql -h 127.0.0.1 -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='caseloop'" | grep -q 1 || psql -h 127.0.0.1 -d postgres -c "CREATE DATABASE caseloop"
 	psql -h 127.0.0.1 -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='caseloop_test'" | grep -q 1 || psql -h 127.0.0.1 -d postgres -c "CREATE DATABASE caseloop_test"
+	psql -h 127.0.0.1 -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='caseloop_scratch'" | grep -q 1 || psql -h 127.0.0.1 -d postgres -c "CREATE DATABASE caseloop_scratch"
 
 migrate:
 	cd backend && uv run alembic upgrade head

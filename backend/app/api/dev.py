@@ -157,7 +157,7 @@ async def run_jobs(payload: RunJobsIn, services: ServicesDep) -> RunJobsOut:
         services.clock.advance(hours=payload.advance_hours)
     total = 0
     for _ in range(payload.max_rounds):
-        ran = await services.scheduler.run_due_jobs()
+        ran = await services.scheduler.run_due_jobs(business_id=payload.business_id)
         total += ran
         if ran == 0:
             break

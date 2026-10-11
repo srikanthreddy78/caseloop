@@ -237,6 +237,7 @@ class CreateBusinessOut(BusinessOut):
 class RunJobsIn(BaseModel):
     advance_hours: float = Field(default=0, ge=0, le=24 * 60)
     max_rounds: int = Field(default=20, ge=1, le=200)
+    business_id: uuid.UUID | None = None  # only run this business's jobs
 
 
 class RunJobsOut(BaseModel):

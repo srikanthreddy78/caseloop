@@ -14,7 +14,7 @@ from app.channels.registry import ChannelRegistry
 from app.clock import FakeClock
 from app.config import Settings
 from app.container import Services, build_services
-from app.db import make_engine
+from app.db import make_engine, sibling_database_url
 from app.main import create_app
 from app.models import Base
 from app.notifications import FakeNotifier
@@ -25,11 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 def _test_database_url() -> str:
     url = os.environ.get("CASELOOP_TEST_DATABASE_URL")
-    if url:
-        return url
-    base = Settings().database_url
-    name = base.rsplit("/", 1)[-1].split("?", 1)[0]
-    return base.replace(f"/{name}", f"/{name}_test")
+    return url or sibling_database_url(Settings().database_url, "test")
 
 
 @pytest.fixture(scope="session")
