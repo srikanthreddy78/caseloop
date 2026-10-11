@@ -1,0 +1,289 @@
+"""One agent turn: load state, assess, let the model act through tools, enforce post-conditions."""
+
+from __future__ import annotations
+
+import logging
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, Protocol
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.agent.prompts import system_prompt
+from app.agent.schemas import CaseAssessment
+from app.agent.tools import CaseTools, ToolError, TurnContext, case_snapshot
+from app.cases import state as sm
+from app.cases.service import enqueue_job, load_business, load_case, record_event, transition_case
+from app.channels.registry import ChannelRegistry
+from app.clock import Clock
+from app.db import SessionFactory
+from app.models import (
+    Business,
+    Case,
+    CaseState,
+    Direction,
+    JobKind,
+    Message,
+    Requirement,
+    RequirementStatus,
+    Sender,
+)
+
+log = logging.getLogger(__name__)
+
+TRIGGERS = ("inbound_message", "followup_due", "call_transcribed", "manual")
+
+
+class AgentRunner(Protocol):
+    name: str
+
+    async def run_turn(self, ctx: TurnContext, tools: CaseTools, system: str) -> dict[str, Any]: ...
+
+
+class Assessor(Protocol):
+    name: str
+
+    async def assess(
+        self, business: Business, case: Case, snapshot: dict[str, Any]
+    ) -> CaseAssessment | None: ...
+
+
+@dataclass
+class TurnResult:
+    case_id: uuid.UUID
+    trigger: str
+    skipped: str | None = None
+    terminal_tool: str | None = None
+    messages_sent: int = 0
+    tool_log: list[dict[str, Any]] = field(default_factory=list)
+    provider_meta: dict[str, Any] = field(default_factory=dict)
+    final_state: str | None = None
+
+
+async def apply_assessment(session: AsyncSession, case: Case, assessment: CaseAssessment) -> None:
+    case.category = assessment.category
+    case.subject = (assessment.subject or case.subject or "")[:500] or None
+    case.summary = assessment.summary
+    case.sentiment = assessment.sentiment
+    case.urgency = assessment.urgency
+    case.remedy_requested = assessment.remedy_requested[:500]
+    by_key = {r.key: r for r in case.requirements}
+    for spec in assessment.required:
+        key = spec.key.strip().lower()[:64]
+        if not key or key in by_key:
+            continue
+        req = Requirement(
+            case_id=case.id, key=key, label=spec.label[:200], why_needed=spec.why_needed
+        )
+        session.add(req)
+        case.requirements.append(req)
+        by_key[key] = req
+    last_inbound = next(
+        (m for m in reversed(case.messages) if m.direction == Direction.INBOUND), None
+    )
+    for item in assessment.extracted:
+        found = by_key.get(item.key.strip().lower())
+        if found is None or not item.value.strip():
+            continue
+        found.status = RequirementStatus.PROVIDED
+        found.value = item.value.strip()
+        if last_inbound is not None:
+            found.provided_message_id = last_inbound.id
+    await session.flush()
+
+
+async def run_agent_turn(
+    *,
+    session_factory: SessionFactory,
+    case_id: uuid.UUID,
+    trigger: str,
+    runner: AgentRunner,
+    assessor: Assessor,
+    channels: ChannelRegistry,
+    clock: Clock,
+) -> TurnResult:
+    if trigger not in TRIGGERS:
+        raise ValueError(f"unknown trigger {trigger!r}")
+    result = TurnResult(case_id=case_id, trigger=trigger)
+    async with session_factory() as session:
+        case = await load_case(session, case_id)
+        if case is None:
+            result.skipped = "case not found"
+            return result
+        business = await load_business(session, case.business_id)
+        assert business is not None
+        customer = case.customer
+
+        if sm.is_terminal(case.state):
+            result.skipped = f"case is {case.state}"
+            result.final_state = case.state
+            return result
+        # DB timestamps (not the app clock) decide whether a message arrived mid-turn.
+        inbound_times = [m.created_at for m in case.messages if m.direction == Direction.INBOUND]
+        last_inbound_at = max(inbound_times) if inbound_times else None
+
+        if trigger == "followup_due" and sm.should_abandon(
+            case.followups_sent, business.max_followups
+        ):
+            await _abandon(session, case, business, now=clock.now())
+            await session.commit()
+            result.final_state = case.state
+            result.terminal_tool = "abandon"
+            return result
+
+        if case.state == CaseState.NEW:
+            await transition_case(
+                session, case, CaseState.GATHERING, actor=Sender.SYSTEM, now=clock.now()
+            )
+
+        ctx = TurnContext(
+            session=session,
+            business=business,
+            case=case,
+            customer=customer,
+            channels=channels,
+            clock=clock,
+            trigger=trigger,
+        )
+        if trigger in ("inbound_message", "call_transcribed", "manual"):
+            try:
+                assessment = await assessor.assess(business, case, case_snapshot(ctx))
+            except Exception:
+                log.exception("assessment failed for case %s", case.id)
+                assessment = None
+            if assessment is not None:
+                await apply_assessment(session, case, assessment)
+                await record_event(
+                    session,
+                    business_id=business.id,
+                    case_id=case.id,
+                    type="case_assessed",
+                    actor=Sender.AGENT,
+                    data={
+                        "category": assessment.category,
+                        "sentiment": assessment.sentiment,
+                        "urgency": assessment.urgency,
+                        "required": [r.key for r in assessment.required],
+                        "assessor": assessor.name,
+                    },
+                )
+
+        tools = CaseTools(ctx)
+        try:
+            result.provider_meta = await runner.run_turn(ctx, tools, system_prompt(business))
+        except ToolError as exc:
+            log.warning("turn hit a tool limit on case %s: %s", case.id, exc)
+            await _escalate_system(tools, reason="tool_limit", detail=str(exc))
+        except Exception as exc:
+            log.exception("runner %s failed on case %s", runner.name, case.id)
+            await record_event(
+                session,
+                business_id=business.id,
+                case_id=case.id,
+                type="agent_error",
+                actor=Sender.SYSTEM,
+                data={"runner": runner.name, "error": str(exc)[:1000]},
+            )
+            if trigger != "followup_due":
+                await _escalate_system(tools, reason="agent_error", detail=str(exc)[:500])
+
+        # Post-conditions: every turn must end in a defined state.
+        if ctx.terminal_tool is None and not sm.is_terminal(case.state):
+            if ctx.messages_sent > 0:
+                hours = sm.next_followup_hours(
+                    business.followup_schedule_hours, case.followups_sent
+                )
+                await tools.dispatch(
+                    "schedule_followup", {"hours": hours, "reason": "default policy after asking"}
+                )
+            elif trigger == "followup_due":
+                # Nothing was sent on a nudge turn; keep the case alive and count the attempt.
+                case.followups_sent += 1
+                hours = sm.next_followup_hours(
+                    business.followup_schedule_hours, case.followups_sent
+                )
+                await enqueue_job(
+                    session,
+                    business_id=business.id,
+                    kind=JobKind.FOLLOWUP,
+                    case_id=case.id,
+                    due_at=clock.now() + _hours(hours),
+                    payload={"reason": "retry after silent nudge turn"},
+                )
+            else:
+                await _escalate_system(
+                    tools, reason="agent_no_action", detail="turn ended without acting"
+                )
+
+        result.terminal_tool = ctx.terminal_tool
+        result.messages_sent = ctx.messages_sent
+        result.tool_log = ctx.log
+        result.final_state = case.state
+        await session.commit()
+
+        # Messages that arrived while this turn ran need another turn.
+        if not sm.is_terminal(case.state) and last_inbound_at is not None:
+            newer = await session.execute(
+                select(Message.id)
+                .where(
+                    Message.case_id == case.id,
+                    Message.direction == Direction.INBOUND,
+                    Message.created_at > last_inbound_at,
+                )
+                .limit(1)
+            )
+            if newer.first() is not None:
+                await enqueue_job(
+                    session,
+                    business_id=business.id,
+                    kind=JobKind.AGENT_TURN,
+                    case_id=case.id,
+                    due_at=clock.now(),
+                    payload={"trigger": "inbound_message"},
+                )
+                await session.commit()
+    return result
+
+
+async def _escalate_system(tools: CaseTools, *, reason: str, detail: str) -> None:
+    if tools.ctx.terminal_tool is not None:
+        return
+    await tools.dispatch(
+        "escalate",
+        {
+            "reason": reason,
+            "summary_for_human": f"The agent could not complete this turn ({reason}): {detail}. "
+            "Please review the case timeline and reply to the customer.",
+        },
+    )
+
+
+async def _abandon(session: AsyncSession, case: Case, business: Business, *, now: datetime) -> None:
+    case.escalation = {
+        "reason": "customer_unresponsive",
+        "summary": f"Customer did not reply after {case.followups_sent} follow-ups.",
+    }
+    await transition_case(
+        session,
+        case,
+        CaseState.ABANDONED,
+        actor=Sender.SYSTEM,
+        now=now,
+        data={"reason": "customer_unresponsive", "followups_sent": case.followups_sent},
+    )
+    await enqueue_job(
+        session,
+        business_id=business.id,
+        kind=JobKind.NOTIFY_ESCALATION,
+        case_id=case.id,
+        due_at=now,
+        payload={"reason": "customer_unresponsive"},
+    )
+
+
+def _hours(h: int) -> Any:
+    from datetime import timedelta
+
+    return timedelta(hours=h)

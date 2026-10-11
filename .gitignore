@@ -1,0 +1,17 @@
+.env
+backend/.env
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+dist/
+build/
+*.egg-info/
+.coverage
+htmlcov/
+data/
+node_modules/
+dashboard/dist/
+.DS_Store

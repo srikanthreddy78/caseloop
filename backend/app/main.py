@@ -1,0 +1,101 @@
+from __future__ import annotations
+
+import asyncio
+import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+from app.api import dev, public
+from app.config import Settings, get_settings
+from app.container import Services, build_services
+
+log = logging.getLogger(__name__)
+
+
+def create_app(services: Services | None = None, settings: Settings | None = None) -> FastAPI:
+    settings = settings or (services.settings if services else get_settings())
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        svc = services or build_services(settings)
+        app.state.services = svc
+        task: asyncio.Task[None] | None = None
+        if settings.scheduler_enabled and settings.env != "test":
+            task = asyncio.create_task(svc.scheduler.run_forever(settings.scheduler_poll_seconds))
+        try:
+            yield
+        finally:
+            if task is not None:
+                svc.scheduler.stop()
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    log.debug("scheduler task cancelled")
+                except Exception:
+                    log.exception("scheduler task ended with an error")
+            if services is None:
+                await svc.engine.dispose()
+
+    app = FastAPI(title="Caseloop", version="0.1.0", lifespan=lifespan)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type", "X-API-Key"],
+    )
+
+    @app.exception_handler(HTTPException)
+    async def http_error(_: Request, exc: HTTPException) -> JSONResponse:
+        code = {
+            401: "unauthorized",
+            403: "forbidden",
+            404: "not_found",
+            409: "conflict",
+            422: "validation_error",
+        }
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={
+                "error": {"code": code.get(exc.status_code, "error"), "message": str(exc.detail)}
+            },
+            headers=exc.headers,
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
+        details = [
+            {
+                "field": ".".join(str(p) for p in e.get("loc", [])),
+                "message": e.get("msg"),
+                "code": e.get("type"),
+            }
+            for e in exc.errors()
+        ]
+        return JSONResponse(
+            status_code=422,
+            content={
+                "error": {
+                    "code": "validation_error",
+                    "message": "Request validation failed",
+                    "details": details,
+                }
+            },
+        )
+
+    @app.get("/healthz", tags=["meta"])
+    async def healthz() -> dict[str, str]:
+        return {"status": "ok"}
+
+    app.include_router(public.router)
+    if settings.is_dev:
+        app.include_router(dev.router)
+    return app
+
+
+app = create_app()
