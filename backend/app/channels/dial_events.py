@@ -172,6 +172,18 @@ async def _business_for_number(session: AsyncSession, number: str | None) -> Bus
     ).scalar_one_or_none()
 
 
+def _call_status(raw: Any) -> str:
+    """Dial returns either a plain status string or an object like
+    {"state": "Terminated", "terminationType": "completed", "label": "Completed"}."""
+    if isinstance(raw, dict):
+        return str(raw.get("terminationType") or raw.get("label") or raw.get("state") or "").lower()
+    for attr in ("termination_type", "terminationType", "label", "state"):
+        value = getattr(raw, attr, None)
+        if value:
+            return str(value).lower()
+    return str(raw or "").lower()
+
+
 def _as_dict(event: Any) -> dict[str, Any]:
     if isinstance(event, dict):
         return event
@@ -213,7 +225,7 @@ class DialEventListener:
         async with self.services.session_factory() as session:
             for call in calls:
                 call_id = str(getattr(call, "id", "") or "")
-                status = str(getattr(call, "status", "") or "")
+                status = _call_status(getattr(call, "status", None))
                 transcript = getattr(call, "transcript", None) or getattr(
                     call, "transcript_turns", None
                 )
