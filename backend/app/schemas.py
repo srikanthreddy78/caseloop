@@ -123,6 +123,7 @@ class BusinessOut(BaseModel):
     max_followups: int
     outbound_webhook_url: str | None
     allowed_origins: list[str] = Field(default_factory=list)
+    slack_webhook_url: str | None = None
     model_config = {"from_attributes": True}
 
     @model_validator(mode="before")
@@ -133,6 +134,7 @@ class BusinessOut(BaseModel):
             return value
         data = {name: getattr(value, name) for name in cls.model_fields if hasattr(value, name)}
         data["allowed_origins"] = list((value.settings or {}).get("allowed_origins") or [])
+        data["slack_webhook_url"] = (value.settings or {}).get("slack_webhook_url")
         return data
 
 
@@ -152,6 +154,7 @@ class BusinessUpdate(BaseModel):
     max_followups: int | None = Field(default=None, ge=0, le=10)
     outbound_webhook_url: str | None = Field(default=None, max_length=2000)
     outbound_webhook_secret: str | None = Field(default=None, max_length=128)
+    slack_webhook_url: str | None = Field(default=None, max_length=2000)
     dial_number_id: str | None = None
     dial_phone_number: str | None = None
     allowed_origins: list[str] | None = Field(default=None, max_length=50)

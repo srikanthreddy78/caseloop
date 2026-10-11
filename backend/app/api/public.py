@@ -65,12 +65,10 @@ async def update_me(
     payload: BusinessUpdate, business: BusinessDep, session: SessionDep
 ) -> DataOut[BusinessOut]:
     changes = payload.model_dump(exclude_unset=True)
-    if "allowed_origins" in changes:
-        # Lives in the settings JSON; reassign the dict so SQLAlchemy sees the change.
-        business.settings = {
-            **(business.settings or {}),
-            "allowed_origins": changes.pop("allowed_origins") or [],
-        }
+    # These live in the settings JSON; reassign the dict so SQLAlchemy sees the change.
+    for key, empty in (("allowed_origins", []), ("slack_webhook_url", None)):
+        if key in changes:
+            business.settings = {**(business.settings or {}), key: changes.pop(key) or empty}
     for field, value in changes.items():
         setattr(business, field, value)
     await session.commit()

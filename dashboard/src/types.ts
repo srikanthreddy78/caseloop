@@ -16,7 +16,7 @@ export interface TimelineItem { kind: "event" | "message"; id?: string | null; a
 export interface Business {
   id: string; name: string; slug: string; inbound_email: string; from_email: string; escalation_email: string; widget_public_key: string;
   api_key_prefix: string; dial_phone_number: string | null; context_text: string; followup_schedule_hours: number[]; max_followups: number; outbound_webhook_url: string | null;
-  allowed_origins: string[];
+  allowed_origins: string[]; slack_webhook_url: string | null;
 }
 export interface Job { id: string; kind: string; status: "pending" | "running" | "done" | "failed" | "cancelled"; case_id: string | null; attempts: number; due_at: string; last_error: string | null; payload: Record<string, unknown>; created_at: string; updated_at: string }
 export interface Member { id: string; email: string; name: string; role: "owner" | "member"; created_at: string }

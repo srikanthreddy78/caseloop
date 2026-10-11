@@ -15,6 +15,7 @@ export function Settings() {
     max_followups: business.max_followups,
     outbound_webhook_url: business.outbound_webhook_url || "",
     allowed_origins: (business.allowed_origins || []).join("\n"),
+    slack_webhook_url: business.slack_webhook_url || "",
   });
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -29,7 +30,7 @@ export function Settings() {
     try {
       const r = await api<{ data: Business }>("/v1/businesses/me", {
         method: "PATCH",
-        body: JSON.stringify({ context_text: form.context_text, escalation_email: form.escalation_email, followup_schedule_hours: hours, max_followups: Number(form.max_followups), outbound_webhook_url: form.outbound_webhook_url || null, allowed_origins: origins }),
+        body: JSON.stringify({ context_text: form.context_text, escalation_email: form.escalation_email, followup_schedule_hours: hours, max_followups: Number(form.max_followups), outbound_webhook_url: form.outbound_webhook_url || null, allowed_origins: origins, slack_webhook_url: form.slack_webhook_url || null }),
       });
       setBusiness(r.data); setSaved(true); setTimeout(() => setSaved(false), 2000);
     } catch (ex) { setError((ex as Error).message); }
@@ -72,6 +73,11 @@ export function Settings() {
           <label className="block text-sm font-medium mb-1" htmlFor="origins">Websites allowed to use the chat widget (optional)</label>
           <textarea id="origins" className="field font-mono text-xs min-h-20" placeholder={"https://www.example.com\nhttps://shop.example.com"} value={form.allowed_origins} onChange={(e) => setForm({ ...form, allowed_origins: e.target.value })} />
           <p className="text-xs text-ink-soft mt-1">One origin per line, scheme and host only. Leave empty to accept chats from any site.</p>
+        </div>
+        <div>
+          <label className="block text-sm font-medium mb-1" htmlFor="slack">Slack alerts (optional)</label>
+          <input id="slack" className="field" placeholder="https://hooks.slack.com/services/…" value={form.slack_webhook_url} onChange={(e) => setForm({ ...form, slack_webhook_url: e.target.value })} />
+          <p className="text-xs text-ink-soft mt-1">Incoming-webhook URL. Each case that needs a person is posted here as well as emailed.</p>
         </div>
         {error && <p className="text-clay text-sm">{error}</p>}
         <div><button className="btn btn-primary" type="submit">{saved ? "Saved" : "Save changes"}</button></div>

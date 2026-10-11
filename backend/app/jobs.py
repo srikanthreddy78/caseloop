@@ -13,7 +13,7 @@ from app.cases.service import enqueue_job, load_business, load_case, record_even
 from app.insights.service import generate_insights
 from app.jobs_dial import handle_fetch_call_transcript
 from app.models import JobKind, Sender
-from app.notifications import notify_escalation
+from app.notifications import build_digest, notify_escalation, post_slack_alert
 from app.scheduler import JobContext, Scheduler
 from app.webhooks.outbound import deliver_business_webhook
 
@@ -74,18 +74,22 @@ async def handle_notify_escalation(ctx: JobContext) -> None:
         provider_id = await notify_escalation(
             session, s.channels.notifier, business, case, s.settings.base_url
         )
+        slack_sent = await post_slack_alert(business, case, s.settings.base_url)
         await record_event(
             session,
             business_id=business.id,
             case_id=case.id,
             type="escalation_notified",
             actor=Sender.SYSTEM,
-            data={"to": business.escalation_email, "provider_id": provider_id},
+            data={"to": business.escalation_email, "provider_id": provider_id, "slack": slack_sent},
         )
         await session.commit()
 
 
 INSIGHTS_EVERY_HOURS = 24
+DIGEST_EVERY_HOURS = 24
+# Not a JobKind member: Job.kind is a plain string column and this job never touches a case.
+DIGEST_KIND = "digest"
 
 
 async def handle_insights(ctx: JobContext) -> None:
@@ -107,6 +111,33 @@ async def handle_insights(ctx: JobContext) -> None:
         await session.commit()
 
 
+async def handle_digest(ctx: JobContext) -> None:
+    """Email the business a one-screen summary of what is open, then book tomorrow's."""
+    s = ctx.services
+    now = ctx.clock.now()
+    async with ctx.session_factory() as session:
+        business = await load_business(session, ctx.job.business_id)
+        if business is None:
+            return
+        digest = await build_digest(session, business, now=now, base_url=s.settings.base_url)
+        if digest is not None and s.channels.notifier is not None:
+            subject, text = digest
+            await s.channels.notifier.send_email(
+                to=business.escalation_email,
+                subject=subject,
+                text=text,
+                from_email=business.from_email,
+            )
+        await enqueue_job(
+            session,
+            business_id=business.id,
+            kind=DIGEST_KIND,
+            due_at=now + timedelta(hours=DIGEST_EVERY_HOURS),
+            payload={"recurring": True},
+        )
+        await session.commit()
+
+
 async def handle_deliver_webhook(ctx: JobContext) -> None:
     async with ctx.session_factory() as session:
         business = await load_business(session, ctx.job.business_id)
@@ -115,8 +146,14 @@ async def handle_deliver_webhook(ctx: JobContext) -> None:
         await deliver_business_webhook(business, ctx.job.payload, now=ctx.clock.now())
 
 
-async def ensure_daily_insights_jobs(session_factory: Any, now: Any) -> int:
-    """Called at startup: every business gets exactly one pending recurring insights job."""
+RECURRING: tuple[tuple[str, int], ...] = (
+    (JobKind.INSIGHTS, INSIGHTS_EVERY_HOURS),
+    (DIGEST_KIND, DIGEST_EVERY_HOURS),
+)
+
+
+async def ensure_recurring_jobs(session_factory: Any, now: Any) -> int:
+    """Called at startup: every business gets exactly one pending job per recurring kind."""
     from sqlalchemy import select
 
     from app.models import Business, Job, JobStatus
@@ -125,26 +162,31 @@ async def ensure_daily_insights_jobs(session_factory: Any, now: Any) -> int:
     async with session_factory() as session:
         businesses = (await session.execute(select(Business.id))).scalars().all()
         for business_id in businesses:
-            pending = await session.execute(
-                select(Job.id)
-                .where(
-                    Job.business_id == business_id,
-                    Job.kind == JobKind.INSIGHTS,
-                    Job.status == JobStatus.PENDING,
+            for kind, every_hours in RECURRING:
+                pending = await session.execute(
+                    select(Job.id)
+                    .where(
+                        Job.business_id == business_id,
+                        Job.kind == kind,
+                        Job.status == JobStatus.PENDING,
+                    )
+                    .limit(1)
                 )
-                .limit(1)
-            )
-            if pending.first() is None:
-                await enqueue_job(
-                    session,
-                    business_id=business_id,
-                    kind=JobKind.INSIGHTS,
-                    due_at=now + timedelta(hours=INSIGHTS_EVERY_HOURS),
-                    payload={"recurring": True},
-                )
-                created += 1
+                if pending.first() is None:
+                    await enqueue_job(
+                        session,
+                        business_id=business_id,
+                        kind=kind,
+                        due_at=now + timedelta(hours=every_hours),
+                        payload={"recurring": True},
+                    )
+                    created += 1
         await session.commit()
     return created
+
+
+# main.py still imports the old name.
+ensure_daily_insights_jobs = ensure_recurring_jobs
 
 
 def register_handlers(scheduler: Scheduler) -> None:
@@ -153,6 +195,7 @@ def register_handlers(scheduler: Scheduler) -> None:
     scheduler.register(JobKind.NOTIFY_ESCALATION, handle_notify_escalation)
     scheduler.register(JobKind.FETCH_CALL_TRANSCRIPT, handle_fetch_call_transcript)
     scheduler.register(JobKind.INSIGHTS, handle_insights)
+    scheduler.register(DIGEST_KIND, handle_digest)
     scheduler.register(JobKind.DELIVER_WEBHOOK, handle_deliver_webhook)
 
 
