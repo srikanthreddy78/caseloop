@@ -16,7 +16,7 @@ from app.cases.service import (
     ingest_inbound,
     record_event,
 )
-from app.models import Business, Case, Channel, JobKind, Message, Sender
+from app.models import Business, Case, Channel, Job, JobKind, JobStatus, Message, Sender
 
 log = logging.getLogger(__name__)
 
@@ -203,10 +203,87 @@ class DialEventListener:
                 log.exception("dial event %s failed", event.get("type"))
                 return {"status": "error"}
 
+    async def sync_recent_calls(self) -> int:
+        """Queue transcript fetches for finished calls we have not ingested (belt and braces)."""
+        client = getattr(self.services.channels, "dial", None)
+        if client is None:
+            return 0
+        calls = await client.list_calls()
+        queued = 0
+        async with self.services.session_factory() as session:
+            for call in calls:
+                call_id = str(getattr(call, "id", "") or "")
+                status = str(getattr(call, "status", "") or "")
+                transcript = getattr(call, "transcript", None) or getattr(
+                    call, "transcript_turns", None
+                )
+                if not call_id or status not in ("completed", "ended") or not transcript:
+                    continue
+                seen = await session.execute(
+                    select(Message.id).where(Message.provider_message_id == call_id).limit(1)
+                )
+                if seen.first() is not None:
+                    continue
+                pending = await session.execute(
+                    select(Job.id)
+                    .where(
+                        Job.kind == JobKind.FETCH_CALL_TRANSCRIPT,
+                        Job.status.in_([JobStatus.PENDING, JobStatus.RUNNING]),
+                        Job.payload["call_id"].astext == call_id,
+                    )
+                    .limit(1)
+                )
+                if pending.first() is not None:
+                    continue
+                number_id = getattr(call, "phone_number_id", None)
+                business = (
+                    (
+                        await session.execute(
+                            select(Business).where(Business.dial_number_id == number_id)
+                        )
+                    ).scalar_one_or_none()
+                    if number_id
+                    else None
+                )
+                if business is None:
+                    continue
+                await enqueue_job(
+                    session,
+                    business_id=business.id,
+                    kind=JobKind.FETCH_CALL_TRANSCRIPT,
+                    due_at=self.services.clock.now(),
+                    payload={"call_id": call_id},
+                )
+                queued += 1
+            await session.commit()
+        return queued
+
+    async def poll_calls_forever(self, interval: float = 60.0) -> None:
+        while not self._stop.is_set():
+            try:
+                queued = await self.sync_recent_calls()
+                if queued:
+                    log.info("queued %d call transcript(s) from Dial", queued)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning("dial call sync failed: %s", str(exc)[:200])
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=interval)
+            except TimeoutError:
+                pass
+
     async def run_forever(self) -> None:
         client = getattr(self.services.channels, "dial", None)
         if client is None:
             return
+        poller = asyncio.create_task(self.poll_calls_forever())
+        try:
+            await self._stream_forever(client)
+        finally:
+            poller.cancel()
+
+    async def _stream_forever(self, client: Any) -> None:
         delay = 1.0
         log.info("dial event stream listener started")
         while not self._stop.is_set():

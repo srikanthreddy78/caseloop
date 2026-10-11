@@ -93,3 +93,26 @@ async def test_carrier_rejection_flags_the_reply_as_undelivered(
     timeline = (await auth_client.get(f"/v1/cases/{case_id}/timeline")).json()["data"]
     assert any(t.get("type") == "delivery_failed" for t in timeline)
     del provider_id
+
+
+async def test_finished_calls_are_queued_once(services: Services, business: dict[str, Any]) -> None:
+    class Call:
+        def __init__(self, cid: str, status: str, transcript: str | None) -> None:
+            self.id, self.status, self.transcript = cid, status, transcript
+            self.phone_number_id = BUSINESS_PAYLOAD["dial_number_id"]
+
+    class FakeDial:
+        async def list_calls(self) -> list[Call]:
+            return [
+                Call("call_1", "completed", "agent: hi\nuser: lamp broken"),
+                Call("call_2", "in_progress", None),
+                Call("call_3", "completed", None),
+            ]
+
+    services.channels.dial = FakeDial()
+    try:
+        listener = DialEventListener(services)
+        assert await listener.sync_recent_calls() == 1
+        assert await listener.sync_recent_calls() == 0  # already queued
+    finally:
+        services.channels.dial = None
