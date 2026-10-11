@@ -54,7 +54,7 @@ async def handle_fetch_call_transcript(ctx: JobContext) -> None:
         )
         if case is None:
             case = await open_case(
-                session, business, customer, channel=Channel.SMS, now=now, subject="Phone call"
+                session, business, customer, channel=Channel.VOICE, now=now, subject="Phone call"
             )
         await append_inbound(
             session,

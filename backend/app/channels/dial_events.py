@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -183,6 +184,20 @@ async def _business_for_number(session: AsyncSession, number: str | None) -> Bus
     ).scalar_one_or_none()
 
 
+def _call_is_recent(call: Any, since: datetime) -> bool:
+    """Only calls that started after the listener came up (minus a small lookback) are considered."""
+    raw = getattr(call, "created_at", None) or getattr(call, "queued_at", None)
+    if not raw:
+        return True
+    try:
+        created = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=UTC)
+    return created >= since
+
+
 def _call_status(raw: Any) -> str:
     """Dial returns either a plain status string or an object like
     {"state": "Terminated", "terminationType": "completed", "label": "Completed"}."""
@@ -210,9 +225,11 @@ def _as_dict(event: Any) -> dict[str, Any]:
 class DialEventListener:
     """Consumes the account event stream so local and single-host deployments need no webhook."""
 
-    def __init__(self, services: Any) -> None:
+    def __init__(self, services: Any, *, lookback_minutes: int = 10) -> None:
         self.services = services
         self._stop = asyncio.Event()
+        self._handled_calls: set[str] = set()
+        self._started_at = services.clock.now() - timedelta(minutes=lookback_minutes)
 
     async def handle(self, raw: Any) -> dict[str, str]:
         event = _as_dict(raw)
@@ -236,6 +253,8 @@ class DialEventListener:
         async with self.services.session_factory() as session:
             for call in calls:
                 call_id = str(getattr(call, "id", "") or "")
+                if call_id in self._handled_calls or not _call_is_recent(call, self._started_at):
+                    continue
                 status = _call_status(getattr(call, "status", None))
                 transcript = getattr(call, "transcript", None) or getattr(
                     call, "transcript_turns", None
@@ -290,6 +309,7 @@ class DialEventListener:
                     payload={"call_id": call_id},
                 )
                 queued += 1
+                self._handled_calls.add(call_id)
             await session.commit()
         return queued
 
